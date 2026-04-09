@@ -1,0 +1,9 @@
+graft data
+include LICENSE
+include CHANGELOG.md
+include README.zh.md
+include .env.example
+
+# Local development only; not shipped on PyPI (core package is ``main`` + ``data/``).
+prune tests
+prune scripts

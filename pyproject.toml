@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "LLMRouterBench"
+version = "0.1.0"
+description = "LLMRouterBench: tier-only routing supervision data and Section 11 nominal cost metrics"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [{ name = "LLMRouterBench contributors" }]
+keywords = ["llm", "router", "benchmark"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = ["requests>=2.28.0"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[project.scripts]
+LLMRouterBench = "main.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["main*"]
+
+[tool.setuptools]
+include-package-data = true
+license-files = ["LICENSE"]
+
+# Ship manifest + single question bank when present at build time.
+[tool.setuptools.package-data]
+main = ["data/manifest.json", "data/question_bank.jsonl"]
