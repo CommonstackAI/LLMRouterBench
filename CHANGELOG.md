@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the open-source **LLMRouterBench** Python distribution (import package **`main`**) are documented in this file.
+All notable changes to the open-source **CommonRouterBench** Python distribution (import package **`main`**) are documented in this file.
 
 ## [0.1.0] - 2026-04-09
 
@@ -10,7 +10,7 @@ All notable changes to the open-source **LLMRouterBench** Python distribution (i
 - Tier-only routing supervision corpus (`data/question_bank.jsonl`) and per-source counts (`data/manifest.json`), included in wheels when those files are present at build time.
 - Import package **`main`**: dataset iterators, nominal RouterBench v2 §11.2-style step metrics, **`main.eval`** question-bank runner (`run_question_bank_eval`, `evaluate_question_bank_rows`, `FunctionPredictor`, `LlmDigitClassifierPredictor`), and OpenAI-compatible chat helper for digit tier classification.
 - Eval summary **`router_accounting`**: `pass_rate_percent`, `exact_match_rate_percent`, `accounting_savings_score_percent`, **`overall_score_percent`** (arithmetic mean of those three; NaN if any component is NaN), plus underlying `D_nominal_usd` / `N_mixed` (evaluable rows only).
-- Console entry point **`LLMRouterBench`** → `main.cli:main` (also `python -m main.cli`).
+- Console entry point **`CommonRouterBench`** → `main.cli:main` (also `python -m main.cli`).
 
 ### Changed
 
@@ -19,4 +19,4 @@ All notable changes to the open-source **LLMRouterBench** Python distribution (i
 
 ### Notes
 
-- PyPI / pip name is **`LLMRouterBench`**; Python imports use **`import main`** (see README).
+- PyPI / pip name is **`CommonRouterBench`**; Python imports use **`import main`** (see README).

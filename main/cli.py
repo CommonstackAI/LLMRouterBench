@@ -11,7 +11,7 @@ from main.metrics import aggregate_routerbench_metrics, case_metrics_from_dict
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="LLMRouterBench", description="LLMRouterBench utilities")
+    parser = argparse.ArgumentParser(prog="CommonRouterBench", description="CommonRouterBench utilities")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     m = sub.add_parser("metrics", help="Aggregate Section 11 metrics from a cases JSON file")

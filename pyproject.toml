@@ -3,13 +3,13 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "LLMRouterBench"
+name = "CommonRouterBench"
 version = "0.1.0"
-description = "LLMRouterBench: tier-only routing supervision data and Section 11 nominal cost metrics"
+description = "CommonRouterBench: tier-only routing supervision data and Section 11 nominal cost metrics"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-authors = [{ name = "LLMRouterBench contributors" }]
+authors = [{ name = "CommonRouterBench contributors" }]
 keywords = ["llm", "router", "benchmark"]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -30,7 +30,7 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 
 [project.scripts]
-LLMRouterBench = "main.cli:main"
+CommonRouterBench = "main.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

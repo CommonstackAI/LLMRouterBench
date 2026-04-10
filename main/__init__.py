@@ -1,4 +1,4 @@
-"""LLMRouterBench: tier-only routing supervision data and Section 11 nominal metrics."""
+"""CommonRouterBench: tier-only routing supervision data and Section 11 nominal metrics."""
 
 from main.chat_messages import (
     format_linear_messages_as_user_prompt,

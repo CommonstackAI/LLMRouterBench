@@ -1,10 +1,10 @@
-# LLMRouterBench
+# CommonRouterBench
 
 > **说明**：本文件是 `[README.md](README.md)` 的**中文对照**，方便审阅与提修改意见；**对外/协作以英文 README 为准**。
 
 **版本：** `0.1.0`（变更见 [CHANGELOG.md](CHANGELOG.md)）。
 
-本目录是仓库中**唯一**计划开源的部分：可安装发行名 `**LLMRouterBench`**（Python 中 `**import main**`）以及公开 **仅档位（tier-only）** 题库 `**data/`**。对外只发布 `**main**`、`**data/**` 与文档；**不包含** pytest / HTTP 冒烟等测试脚本（见 `**.gitignore`**、`**MANIFEST.in**`）。
+本目录是仓库中**唯一**计划开源的部分：可安装发行名 `**CommonRouterBench`**（Python 中 `**import main**`）以及公开 **仅档位（tier-only）** 题库 `**data/`**。对外只发布 `**main**`、`**data/**` 与文档；**不包含** pytest / HTTP 冒烟等测试脚本（见 `**.gitignore`**、`**MANIFEST.in**`）。
 
 该 Python 包提供 **路由监督** 样本（LLM 输入 + **仅能力档位** 标签——开放语料中**不含**厂商模型 ID），以及与 RouterBench v2 指南 **第 11 节** 对齐的 **评测指标**（通过率、名义成本节省分值、名义节省金额等）。
 
@@ -19,7 +19,7 @@ pip install -e .
 发布到 PyPI 后，使用者可：
 
 ```bash
-pip install LLMRouterBench
+pip install CommonRouterBench
 ```
 
 代码中仍使用 `**import main**`；**pip 包名**与 **Python 包名**刻意不同。
@@ -277,7 +277,7 @@ summary = build_eval_summary(
 
 ```bash
 python -m main.cli metrics --cases path/to/cases.json
-LLMRouterBench metrics --cases path/to/cases.json
+CommonRouterBench metrics --cases path/to/cases.json
 ```
 
 在应用里使用 `**OpenAICompatRouterClassifier**` 时，请用环境变量或自有配置传入网关信息。`**.env.example**` 列出常见变量名（`**OPENROUTER_***` 或 `**OPENAI_***` / `**API_KEY**` + `**BASE_URL**`）；客户端要求 base URL **已含 `/v1`**。
@@ -296,7 +296,7 @@ twine check dist/*
 twine upload dist/*
 ```
 
-**命名提醒：** PyPI / pip 名为 `**LLMRouterBench`**，顶层 import 包名为 `**main**`；勿在示例脚本旁使用会遮蔽 `main` 的文件名（例如避免与 `import main` 冲突的 `main.py`）。
+**命名提醒：** PyPI / pip 名为 `**CommonRouterBench`**，顶层 import 包名为 `**main**`；勿在示例脚本旁使用会遮蔽 `main` 的文件名（例如避免与 `import main` 冲突的 `main.py`）。
 
 ## 许可证
 

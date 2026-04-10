@@ -1,12 +1,12 @@
-# LLMRouterBench
+# CommonRouterBench
 
-Import the library as Python package **`main`** (e.g. `from main import …`). The **`LLMRouterBench`** name is the PyPI project and console script. Published trees and PyPI artifacts ship **`main`**, **`data/`**, and documentation only—**no** bundled test or smoke scripts.
+Import the library as Python package **`main`** (e.g. `from main import …`). The **`CommonRouterBench`** name is the PyPI project and console script. Published trees and PyPI artifacts ship **`main`**, **`data/`**, and documentation only—**no** bundled test or smoke scripts.
 
 **Version:** `0.1.0` (see [CHANGELOG.md](CHANGELOG.md)).
 
 Chinese review copy: [README.zh.md](README.zh.md).
 
-This directory is the **only** part of the repository intended for open source: the installable distribution **`LLMRouterBench`** (import package **`main`**; see **Python API**) and the public **tier-only** question bank under **`data/`**. Test and HTTP-smoke harnesses are **not** part of this release (see **`.gitignore`** / **`MANIFEST.in`**).
+This directory is the **only** part of the repository intended for open source: the installable distribution **`CommonRouterBench`** (import package **`main`**; see **Python API**) and the public **tier-only** question bank under **`data/`**. Test and HTTP-smoke harnesses are **not** part of this release (see **`.gitignore`** / **`MANIFEST.in`**).
 
 Python package for **routing supervision** items (LLM inputs plus **tier-only** targets — no vendor model IDs in the open corpus) and **evaluation metrics** aligned with the RouterBench v2 guide Section 11 (pass rate, nominal cost savings score, nominal money saved).
 
@@ -21,7 +21,7 @@ pip install -e .
 After you publish to PyPI, consumers can run:
 
 ```bash
-pip install LLMRouterBench
+pip install CommonRouterBench
 ```
 
 They still **`import main`** in code; the distribution name and the import package name differ on purpose.
@@ -266,7 +266,7 @@ Public helpers also include `manifest_proportional_quotas`, `proportional_reserv
 
 ```bash
 python -m main.cli metrics --cases path/to/cases.json
-LLMRouterBench metrics --cases path/to/cases.json
+CommonRouterBench metrics --cases path/to/cases.json
 ```
 
 When calling **`OpenAICompatRouterClassifier`** from your application, configure the API with environment variables or your own config layer. **`.env.example`** lists common variable names (**`OPENROUTER_*`** or **`OPENAI_*`** / **`API_KEY`** + **`BASE_URL`**); the client expects a base URL that already includes **`/v1`**.
@@ -286,7 +286,7 @@ twine upload dist/*
 ```
 
 
-**Naming reminder:** the PyPI / pip distribution is **`LLMRouterBench`**; the only shipped import top-level package is **`main`**. Avoid shadowing `main` in small throwaway scripts (e.g. do not name your module `main.py` next to snippets that `import main`).
+**Naming reminder:** the PyPI / pip distribution is **`CommonRouterBench`**; the only shipped import top-level package is **`main`**. Avoid shadowing `main` in small throwaway scripts (e.g. do not name your module `main.py` next to snippets that `import main`).
 
 ## License
 
