@@ -54,7 +54,14 @@ def format_linear_messages_as_user_prompt(linear: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
-def question_bank_messages_to_classifier_prompt(messages: list[dict[str, Any]]) -> str:
-    """Convert a question_bank row ``messages`` field into a single user prompt string."""
+def question_bank_messages_to_classifier_prompt(
+    messages: list[dict[str, Any]],
+    functions: list[dict[str, Any]] | None = None,
+) -> str:
+    """Convert a question_bank row ``messages`` and optional ``functions`` into a single user prompt string."""
     linear = linearize_messages_for_openai_compat(messages)
-    return format_linear_messages_as_user_prompt(linear)
+    prompt = format_linear_messages_as_user_prompt(linear)
+    if functions:
+        tool_json = json.dumps(functions, indent=2, ensure_ascii=False)
+        prompt = f"### available_tools\n{tool_json}\n\n{prompt}"
+    return prompt

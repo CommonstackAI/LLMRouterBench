@@ -38,7 +38,8 @@ class LlmDigitClassifierPredictor:
         messages = row["messages"]
         if not isinstance(messages, list):
             raise ValueError(f"row {rid!r} messages must be a list")
-        prompt = question_bank_messages_to_classifier_prompt(messages)
+        functions = row.get("functions")
+        prompt = question_bank_messages_to_classifier_prompt(messages, functions=functions)
         result = self._clf.predict_tier_id(prompt)
         return TierPrediction(tier_id=result.tier_id, usage=result.usage)
 

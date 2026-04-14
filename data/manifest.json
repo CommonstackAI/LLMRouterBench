@@ -7,6 +7,9 @@
     "target_tier_id"
   ],
   "no_model_ids_in_records": true,
+  "optional_fields": {
+    "functions": "List of tool/function schemas (name, description, parameters). Present only in bfcl records."
+  },
   "sources": {
     "bfcl": {
       "source_path": "bfcl/bfcl_routing_supervision.jsonl",
