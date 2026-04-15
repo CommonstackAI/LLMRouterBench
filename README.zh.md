@@ -45,19 +45,19 @@ print(summary["router_accounting"])
 | 路径      | 作用                                                                 |
 | ------- | ------------------------------------------------------------------ |
 | `main/` | **对外发布**的 Python 包（`import main`）。                                 |
-| `data/` | `**question_bank.jsonl`**、`**manifest.json**`（构建 wheel 时若存在则打入包内）。 |
+| `data/` | **`question_bank.jsonl`**、**`manifest.json`**（构建 wheel 时若存在则打入包内）。 |
 
 
 从私有 benchmark 导出**重新生成 `data/`** 不在本发布包职责内；若有需要请在你自己的流水线或私有仓库中维护合并工具。
 
 ## 数据布局
 
-`**data/**` 下产物：
+**`data/`** 下产物：
 
-- `**data/question_bank.jsonl**` — 全部路由监督步骤，**单文件**（无按 benchmark 分子目录）。
-- `**data/manifest.json`** — 各来源行数与 schema 说明。
+- **`data/question_bank.jsonl`** — 全部路由监督步骤，**单文件**（无按 benchmark 分子目录）。
+- **`data/manifest.json`** — 各来源行数与 schema 说明。
 
-每一行含字符串字段 `**benchmark**`（如 `swebench`、`mtrag`）供过滤。
+每一行含字符串字段 **`benchmark`**（如 `swebench`、`mtrag`）供过滤。
 
 ### 开放语料：仅档位标签（无模型 ID）
 
@@ -76,7 +76,7 @@ print(summary["router_accounting"])
 
 ## 数据分布
 
-下列统计与当前仓库中的 `**data/question_bank.jsonl`**、`**data/manifest.json**` 一致（共 **1010** 条路由监督步骤）。若从私有流水线重新构建题库，数字可能变化。
+下列统计与当前仓库中的 **`data/question_bank.jsonl`**、**`data/manifest.json`** 一致（共 **1010** 条路由监督步骤）。若从私有流水线重新构建题库，数字可能变化。
 
 对 **BFCL** 而言，公开题库现在同时包含 **single-turn** 与 **multi-turn** 路由监督数据。
 
@@ -119,7 +119,7 @@ print(summary["router_accounting"])
 
 ## 名义定价（USD / 百万 token）
 
-以代码为准：`main.pricing` 中的 `TIER_*_USD_PER_1M` 常量。下表与发布包内数值一致。
+以代码为准：`main.pricing` 中的 **`TIER_OUTPUT_USD_PER_1M`**、**`TIER_INPUT_USD_PER_1M`**、**`TIER_CACHE_READ_USD_PER_1M`**、**`TIER_CACHE_WRITE_USD_PER_1M`**。旧版 **`section_11`** / **`step_nominal_cost_usd`** 仅使用输出价（**`TIER_OUTPUT_USD_PER_1M`**）。下表与发布包内数值一致。
 
 ### 输出（completion）token
 
@@ -150,21 +150,21 @@ print(summary["router_accounting"])
 - **全量题库** — `run_question_bank_eval(..., n=None)`：按**文件顺序**遍历每一行（当前公开构建约 1010 步）。
 - **固定条数、按来源分层** — API 传 `n=N`：按 `data/manifest.json` 里 `sources.*.line_count` 做 **最大余数法** 配额，再对每个 benchmark 层做 **一遍扫描的蓄水池抽样**（`--seed` 固定随机数）。使五个逻辑 benchmark（`swebench`、`pinchbench`、`mtrag`、`qmsum`、`bfcl`）在全库中的占比与完整语料大致一致。
 
-请在评测 JSON 中报告 `**sample_mode`**、`**benchmark_counts**`、`**by_benchmark**`，以便他人复现你的划分。
+请在评测 JSON 中报告 **`sample_mode`**、**`benchmark_counts`**、**`by_benchmark`**，以便他人复现你的划分。
 
 ### OpenAI 兼容 chat 接入（单数字档位输出）
 
-若你**自行选择**通过 OpenAI 兼容 HTTP API 调用聊天模型，本仓库提供 `**OpenAICompatRouterClassifier`** 与 `**LlmDigitClassifierPredictor**` 所实现的 **数字档位** 约定。这仅是**参考接入方式**，**不代表**我们推荐「必须用 LLM 做路由」优于规则、传统机器学习或其它设计。
+若你**自行选择**通过 OpenAI 兼容 HTTP API 调用聊天模型，本仓库提供 **`OpenAICompatRouterClassifier`** 与 **`LlmDigitClassifierPredictor`** 所实现的 **数字档位** 约定。这仅是**参考接入方式**，**不代表**我们推荐「必须用 LLM 做路由」优于规则、传统机器学习或其它设计。
 
 约定内容为：
 
 1. 将该行的 `messages` 线性拼成一条 user 字符串（`question_bank_messages_to_classifier_prompt`）。
 2. **每行一次** chat 补全；助手回复必须能被解析为**单个数字** `0`–`3`（允许首尾空白；**不能**多行或多余说明文字——见 `parse_tier_response_to_id`）。
-3. 在你自己的驱动代码里调用 `main.eval` 的 `**run_question_bank_eval`** / `**evaluate_question_bank_rows**`（加载行、调用预测器、汇总 JSON）。
+3. 在你自己的驱动代码里调用 `main.eval` 的 **`run_question_bank_eval`** / **`evaluate_question_bank_rows`**（加载行、调用预测器、汇总 JSON）。
 
 ### 任意预测器（规则、sklearn 等）
 
-实现 `f(row: dict) -> int`，从原始行返回 **0..3 的档位 id**（可不用 `messages`，或从中抽特征）。用 `**FunctionPredictor`** 包装后传给 `**run_question_bank_eval**` 或 `**evaluate_question_bank_rows**`。不需要 HTTP，也不需要 chat 模板；汇总 JSON 与 `**by_benchmark**` 拆分形式相同。
+实现 `f(row: dict) -> int`，从原始行返回 **0..3 的档位 id**（可不用 `messages`，或从中抽特征）。用 **`FunctionPredictor`** 包装后传给 **`run_question_bank_eval`** 或 **`evaluate_question_bank_rows`**。不需要 HTTP，也不需要 chat 模板；汇总 JSON 与 **`by_benchmark`** 拆分形式相同。
 
 ## 记分规则（路由步骤评测）
 
@@ -192,11 +192,11 @@ print(summary["router_accounting"])
 
 - **语义前缀：** 相邻两步的 **`messages`** 在 **`role`**、**`content`**（字符串或块列表；块内忽略 **`cache_control`**）、**`tool_calls`**、**`tool_call_id`**、**`name`** 上比较，避免上游日志序列化差异误判缓存。
 - **prompt 拆分（baseline / gold / pred 各自一条路径）：** baseline 恒为 **`high`**。若该路径上本步档位与上步**不同**，本步整段 prompt 按 **input** 计价（冷启动）。若**相同**且上步 **`messages`** 是当前步的**语义前缀**，则前缀为 **cache read**、增量为 **cache write**；否则回退为仅 **input**。
-- **输出 token：** 有下一步时，从 **`messages`** 增量中只计 **`role=assistant`**（含 **`tool_calls`** JSON）。轨迹最后一步用前面步估算值的平均，否则用 **`fallback_output_tokens`**（见 `router_accounting` 字段）。
+- **输出 token：** 有下一步时，从 **`messages`** 增量中只计 **`role=assistant`**（含 **`tool_calls`** JSON）；该步使用**金标**档位在 **`TIER_TOKENIZER_ENCODING`** 中的编码做计数。轨迹最后一步用前面步估算值的平均，否则用 **`fallback_output_tokens`**（见 `router_accounting` 字段）。
 
 ### 账本式路由指标（`router_accounting`）
 
-由 **`compute_router_accounting_metrics`**（`main.eval.section11`）计算。任一步带 **`error`** 的 trajectory 在 **`pass_rate_percent`** 上计为**未通过**。
+由 **`compute_router_accounting_metrics`**（`main.eval.section11`）计算。含 **`error`** 的步不计入 **`evaluable_step_count`**，也不进入 **`D_usd` / `N_usd`** 的逐步累加；但只要 trajectory 中**任一步**含 **`error`**，该 trajectory 在 **`pass_rate_percent`** 与 **`exact_match_rate_percent`** 上均计为**未通过**。
 
 - **Trajectory 通过：** 无 **`error`**，且每个可评步满足 **`pred_tier_id >= gold_tier_id`**。
 - **Trajectory 全中：** trajectory 通过且每个可评步 **`pred_tier_id == gold_tier_id`**。
@@ -211,9 +211,9 @@ print(summary["router_accounting"])
 | **`skipped_step_count`** | 含 **`error`** 的行数。 |
 | **`D_usd`** | **`Σ (baseline_cost − gold_cost)`**（可评步）。 |
 | **`N_usd`** | 按上段 pass / fail trajectory 规则。 |
-| **`pass_rate_percent`** | **`100 × passed_trajectories / total_trajectories`**。 |
-| **`exact_match_rate_percent`** | **`100 × exact_match_trajectories / total_trajectories`**。**注意：** 与顶层 **`tier_match_accuracy`**（**按步**完全匹配率）**不是**同一指标。 |
-| **`accounting_savings_score_percent`** | **`100 × N_usd / D_usd`**（**`D_usd > 0`** 时）；否则 NaN。 |
+| **`pass_rate_percent`** | **`100 × passed_trajectories / total_trajectories`**；无 trajectory 时为 NaN。 |
+| **`exact_match_rate_percent`** | **`100 × exact_match_trajectories / total_trajectories`**；无 trajectory 时为 NaN。**注意：** 与顶层 **`tier_match_accuracy`**（**按步**完全匹配率）**不是**同一指标。 |
+| **`accounting_savings_score_percent`** | **`100 × N_usd / D_usd`**（**`D_usd > 0`** 时）；**`D_usd == 0`** 或无 trajectory 时为 NaN。 |
 | **`overall_score_percent`** | 上述三个百分量的算术平均；任一为 NaN 则总分为 NaN。 |
 | **`fallback_output_tokens`** | 无法从增量推断输出 token 时的回退常数。 |
 
@@ -278,12 +278,12 @@ assert result.tier_id == row["target_tier_id"]
 
 ### 题库评测（`main.eval`）
 
-**抽样**、**记分**与可插拔预测器（`**FunctionPredictor`**、`**LlmDigitClassifierPredictor**` 或任意 `**QuestionBankRouterPredictor**`）的编程入口。语义见 **Benchmark 用法** 与 **记分规则**。
+**抽样**、**记分**与可插拔预测器（**`FunctionPredictor`**、**`LlmDigitClassifierPredictor`** 或任意 **`QuestionBankRouterPredictor`**）的编程入口。语义见 **Benchmark 用法** 与 **记分规则**。
 
-实现 `**QuestionBankRouterPredictor`**（方法 `predict(row) -> TierPrediction`），或使用：
+实现 **`QuestionBankRouterPredictor`**（方法 `predict(row) -> TierPrediction`），或使用：
 
-- `**FunctionPredictor**`：封装任意 `callable(row: dict) -> int`（启发式、sklearn `predict` 等）；无需 chat prompt。
-- `**LlmDigitClassifierPredictor**`：可选的 OpenAI 兼容 chat 封装（`OpenAICompatRouterClassifier` + `question_bank_messages_to_classifier_prompt`）。
+- **`FunctionPredictor`**：封装任意 `callable(row: dict) -> int`（启发式、sklearn `predict` 等）；无需 chat prompt。
+- **`LlmDigitClassifierPredictor`**：可选的 OpenAI 兼容 chat 封装（`OpenAICompatRouterClassifier` + `question_bank_messages_to_classifier_prompt`）。
 
 ```python
 from main.eval import (
@@ -316,7 +316,7 @@ summary = build_eval_summary(
 # summary = run_question_bank_eval(oracle, predictor_label="oracle_gold", n=20, seed=1)
 ```
 
-公开辅助函数还包括：`manifest_proportional_quotas`、`proportional_reservoir_sample`、`load_all_question_bank_rows`、`compute_section11`、`aggregate_by_benchmark`。
+公开辅助函数还包括：`manifest_proportional_quotas`、`proportional_reservoir_sample`、`load_all_question_bank_rows`、`compute_section11`、`compute_router_accounting_metrics`、`aggregate_by_benchmark`。
 
 ## 命令行（CLI）
 
@@ -325,13 +325,13 @@ python -m main.cli metrics --cases path/to/cases.json
 CommonRouterBench metrics --cases path/to/cases.json
 ```
 
-在应用里使用 `**OpenAICompatRouterClassifier**` 时，请用环境变量或自有配置传入网关信息。`**.env.example**` 列出常见变量名（`**OPENROUTER_***` 或 `**OPENAI_***` / `**API_KEY**` + `**BASE_URL**`）；客户端要求 base URL **已含 `/v1`**。
+在应用里使用 **`OpenAICompatRouterClassifier`** 时，请用环境变量或自有配置传入网关信息。**`.env.example`** 列出常见变量名（**`OPENROUTER_*`** 或 **`OPENAI_*`** / **`API_KEY`** + **`BASE_URL`**）；客户端要求 base URL **已含 `/v1`**。
 
 ## 发布（维护者）
 
-1. 上传 PyPI 前在 `pyproject.toml` 中填写 `**[project.urls]**`（Homepage、Repository 等）。
-2. 若希望 wheel 内含题库，构建前确保存在 `**data/question_bank.jsonl**` 与 `**data/manifest.json**`（见 `pyproject.toml` 中 `package-data`）。
-3. 提升 `**version**`，并在 `**CHANGELOG.md**` 中追加一节。
+1. 上传 PyPI 前在 `pyproject.toml` 中填写 **`[project.urls]`**（Homepage、Repository 等）。
+2. 若希望 wheel 内含题库，构建前确保存在 **`data/question_bank.jsonl`** 与 **`data/manifest.json`**（见 `pyproject.toml` 中 `package-data`）。
+3. 提升 **`version`**，并在 **`CHANGELOG.md`** 中追加一节。
 4. 构建与上传：
 
 ```bash
@@ -341,8 +341,8 @@ twine check dist/*
 twine upload dist/*
 ```
 
-**命名提醒：** PyPI / pip 名为 `**CommonRouterBench`**，顶层 import 包名为 `**main**`；勿在示例脚本旁使用会遮蔽 `main` 的文件名（例如避免与 `import main` 冲突的 `main.py`）。
+**命名提醒：** PyPI / pip 名为 **`CommonRouterBench`**，顶层 import 包名为 **`main`**；勿在示例脚本旁使用会遮蔽 `main` 的文件名（例如避免与 `import main` 冲突的 `main.py`）。
 
 ## 许可证
 
-Apache-2.0（见仓库根目录 `**LICENSE**` 与 `pyproject.toml`）。第三方 benchmark 数据可能有单独许可证。
+Apache-2.0（见仓库根目录 **`LICENSE`** 与 `pyproject.toml`）。第三方 benchmark 数据可能有单独许可证。

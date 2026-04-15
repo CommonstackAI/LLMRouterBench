@@ -111,7 +111,7 @@ For **BFCL**, the public corpus now includes both **single-turn** and **multi-tu
 
 ## Nominal pricing (USD per 1M tokens)
 
-Authoritative values live in **`main.pricing`** (`TIER_*_USD_PER_1M`). The tables below mirror the shipped constants.
+Authoritative values live in **`main.pricing`**: **`TIER_OUTPUT_USD_PER_1M`**, **`TIER_INPUT_USD_PER_1M`**, **`TIER_CACHE_READ_USD_PER_1M`**, and **`TIER_CACHE_WRITE_USD_PER_1M`**. Legacy **`section_11`** / **`step_nominal_cost_usd`** use output pricing only (**`TIER_OUTPUT_USD_PER_1M`**). The tables below mirror the shipped constants.
 
 ### Output (completion) tokens
 
@@ -184,11 +184,11 @@ Per-step costs for **`router_accounting`** count tokens from each row’s **`mes
 
 - **Semantic prefix check:** consecutive-step **`messages`** are compared on **`role`**, **`content`** (string or list-of-blocks; **`cache_control`** inside blocks is ignored), **`tool_calls`**, **`tool_call_id`**, and **`name`**, so harmless serialization differences from upstream log export do not break cache accounting.
 - **Prompt split (per path: baseline / gold / pred):** baseline tier is always **`high`**. For each path, if the path’s tier **changes** from the previous step, the full prompt at that step is priced as **input** only (cold start). If the tier is **unchanged** and the previous **`messages`** are a **semantic prefix** of the current ones, the prefix is **cache read** and the delta is **cache write**; otherwise fall back to **input** only.
-- **Output tokens:** for step *i* with a following step, estimated from **`messages`** delta (assistant role only, including **`tool_calls`** JSON). The last step in a trajectory uses the trajectory’s average of those estimates when available, else **`fallback_output_tokens`** (see `router_accounting` JSON field).
+- **Output tokens:** for step *i* with a following step, estimated from **`messages`** delta (assistant role only, including **`tool_calls`** JSON), using that step’s **gold** tier encoding from **`TIER_TOKENIZER_ENCODING`**. The last step in a trajectory uses the trajectory’s average of those estimates when available, else **`fallback_output_tokens`** (see `router_accounting` JSON field).
 
 ### Router accounting metrics (`router_accounting`)
 
-Computed in **`compute_router_accounting_metrics`** (`main.eval.section11`). Rows with **`error`** are still grouped by trajectory but do not contribute **`pred_tier_id`** / **`gold_tier_id`** math inside failed trajectories; any step with **`error`** marks the **whole trajectory** as failed for **`pass_rate_percent`**.
+Computed in **`compute_router_accounting_metrics`** (`main.eval.section11`). Steps with **`error`** are excluded from **`evaluable_step_count`** and from **`D_usd`** / **`N_usd`** (they never enter the per-step cost loop). Any trajectory that contains **`error`** on at least one step is **failed** for **`pass_rate_percent`** and **`exact_match_rate_percent`** (those steps still set `has_error` and clear trajectory pass/exact flags).
 
 **Trajectory pass:** no step has **`error`**, and **every** evaluable step satisfies **`pred_tier_id >= gold_tier_id`**.
 
@@ -309,7 +309,7 @@ summary = build_eval_summary(
 # summary = run_question_bank_eval(oracle, predictor_label="oracle_gold", n=20, seed=1)
 ```
 
-Public helpers also include `manifest_proportional_quotas`, `proportional_reservoir_sample`, `load_all_question_bank_rows`, `compute_section11`, and `aggregate_by_benchmark`.
+Public helpers also include `manifest_proportional_quotas`, `proportional_reservoir_sample`, `load_all_question_bank_rows`, `compute_section11`, `compute_router_accounting_metrics`, and `aggregate_by_benchmark`.
 
 ## CLI
 
