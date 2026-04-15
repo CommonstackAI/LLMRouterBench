@@ -36,7 +36,7 @@ print(summary["router_accounting"])
 
 - **What is shipped:** This directory is the **only** part of the repository intended for open source. Published artifacts ship the **`main`** package, the **`data/`** question bank, and documentation. Private test harnesses are excluded.
 - **Version:** `0.1.0` (see [CHANGELOG.md](CHANGELOG.md)).
-- **Dependencies:** The core package depends on **`requests`** for HTTP helpers (`main.router_llm`).
+- **Dependencies:** The core package depends on **`requests`** (HTTP helpers in `main.router_llm`) and **`tiktoken`** (token counting for `router_accounting` in `main.tokenizer`).
 - **Local tests:** You may keep a **`tests/`** directory beside `pyproject.toml` for **pytest**; it is **`.gitignore`d**.
 
 ## Project layout
@@ -109,14 +109,27 @@ For **BFCL**, the public corpus now includes both **single-turn** and **multi-tu
 | `qmsum` | 145 | 132 | 10 | 3 | 0 |
 | `swebench` | 336 | 82 | 37 | 43 | 174 |
 
-## Nominal pricing (output tokens)
+## Nominal pricing (USD per 1M tokens)
+
+Authoritative values live in **`main.pricing`** (`TIER_*_USD_PER_1M`). The tables below mirror the shipped constants.
+
+### Output (completion) tokens
 
 | Public `target_tier` | USD / 1M output tokens |
-|----------------------|-------------------------|
+|----------------------|------------------------|
 | `low`                | 0.5 |
-| `mid`                | 1.2 |
-| `mid_high`           | 3.0 |
-| `high`               | 20.0 |
+| `mid`                | 2.0 |
+| `mid_high`           | 5.0 |
+| `high`               | 25.0 |
+
+### Input, cache read, and cache write (used by `router_accounting` only)
+
+| Public `target_tier` | USD / 1M **input** | USD / 1M **cache read** | USD / 1M **cache write** |
+|----------------------|--------------------|-------------------------|--------------------------|
+| `low`                | 0.26               | 0.13                    | 0.0                      |
+| `mid`                | 0.30               | 0.059                   | 0.0                      |
+| `mid_high`           | 0.50               | 0.05                    | 0.08333                  |
+| `high`               | 5.0                | 0.50                    | 6.25                     |
 
 When computing costs from **concrete model endpoints** inside your harness, this library maps known model ids to these tiers and raises `ValueError` on unknown ids. That mapping lives in code only, not in the open JSONL.
 
@@ -147,32 +160,57 @@ Implement a function `f(row: dict) -> int` that returns **`target_tier_id` in 0.
 
 ## Scoring rules (routing-step evaluation)
 
-These metrics are computed by **`main.eval`**. They evaluate **tier choice at a single supervised step**, using the **nominal output price per 1M tokens** by tier (table above) for **per-step** cost comparisons; they do **not** require running full benchmark tasks to completion.
+These metrics are computed by **`main.eval`**. **`section_11`** (legacy **`cost_savings_score`**) still evaluates **one routing step per row** using **output-token-only** nominal costs and a fixed completion length \(T\) (see below). **`router_accounting`** uses a richer **per-step** cost model (input + cache read + cache write + output) and **trajectory-level** pass/fail for its headline rates and savings ratio. Neither path requires running full benchmark tasks to completion.
 
 | Metric | Definition |
 |--------|------------|
-| **`tier_match_accuracy`** | Fraction of **evaluable** rows (no `error`) where `pred_tier_id == gold_tier_id`. Skipped rows are excluded from the denominator. |
+| **`tier_match_accuracy`** | Fraction of **evaluable** rows (no `error`) where `pred_tier_id == gold_tier_id`. Skipped rows are excluded from the denominator. **Step-level** (one row = one step). |
 | **`valid_response_rate`** | Fraction of rows with a usable prediction (no recorded `error`). |
-| **Pass (`passed`)** | `pred_tier_id >= gold_tier_id` (predicted tier is at least as capable as gold). Rows with `error` are **not** passed. |
-| **`pass_rate`** | `passed / sampled` over all rows. |
-| **`cost_savings_score`** | Let baseline be **always routing at `high` (tier id 3)**. For each **passed** row with gold strictly below `high`, define nominal step costs using a **uniform positive completion length** \(T\) for every row (public bank has no per-step token counts; the library uses one fixed \(T\) so savings ratios are well-defined when all steps share the same \(T\)): `cost(tier) = T × (USD/1M for tier) / 10^6`. Then `save_gt = cost(high) - cost(gold)`, `save_test = cost(high) - cost(pred)`. **Score = `100 × Σ save_test / Σ save_gt`** over passed rows with `save_gt > 0`. |
+| **Pass (`passed`)** | `pred_tier_id >= gold_tier_id` (predicted tier is at least as capable as gold). Rows with `error` are **not** passed. **Per row / step** in summaries built from `evaluate_question_bank_rows`. |
+| **`pass_rate`** | `passed / sampled` over all rows (same per-step semantics as **`passed`**). |
+| **`cost_savings_score`** (legacy **`section_11`**) | Baseline = **always `high` (tier id 3)**. For each **passed** row with gold strictly below `high`, nominal step cost uses **output tokens only** and a **uniform** positive completion length **`assumed_completion_tokens_per_routing_step`** (default **1_000_000**) per row: `cost(tier) = T × (output USD/1M for tier) / 10^6`. Then `save_gt = cost(high) − cost(gold)`, `save_test = cost(high) − cost(pred)`. **Score = `100 × Σ save_test / Σ save_gt`** over passed rows with `save_gt > 0`. |
 
-**Relation to task-level benchmarks:** A **task pass rate** (e.g. whether a SWE-Bench instance is resolved) needs an **end-to-end** harness with executed trajectories. The question-bank eval here is the **routing-supervision** slice: it measures whether your router’s **tier choice** is sufficient (`pass_rate`) and how much **nominal money** it saves versus always using the highest tier (`cost_savings_score`), under the stated assumptions.
+**Relation to task-level benchmarks:** A **task pass rate** (e.g. whether a SWE-Bench instance is resolved) needs an **end-to-end** harness with executed trajectories. The question-bank eval here is the **routing-supervision** slice: it measures whether your router’s **tier choice** is sufficient (`pass_rate`) and how much **nominal money** it saves versus always using the highest tier under the stated assumptions (`cost_savings_score` and/or `router_accounting`).
+
+### Trajectories (`instance_id`)
+
+Rows with the same **`instance_id`** form one **trajectory** (multi-turn supervision). **`step_index`** / **`total_steps`** order steps within that trajectory. Single-turn rows typically have **`total_steps == 1`** and still carry an **`instance_id`**.
+
+For **`router_accounting`**, **`evaluate_question_bank_rows`** and external merge tools (e.g. ClawRouter `score_with_crb.py`) should attach **`instance_id`**, **`step_index`**, **`total_steps`**, and **`messages`** to each **`per_row`** record so costs can be computed from the same prefixes the router saw.
+
+### Token counting (`main.tokenizer`)
+
+Per-step costs for **`router_accounting`** count tokens from each row’s **`messages`** using **`tiktoken`** encodings configured in **`TIER_TOKENIZER_ENCODING`** (currently **`cl100k_base`** for all tiers as an offline approximation; swap encodings there when you wire real vendor tokenizers).
+
+- **Semantic prefix check:** consecutive-step **`messages`** are compared on **`role`**, **`content`** (string or list-of-blocks; **`cache_control`** inside blocks is ignored), **`tool_calls`**, **`tool_call_id`**, and **`name`**, so harmless serialization differences from upstream log export do not break cache accounting.
+- **Prompt split (per path: baseline / gold / pred):** baseline tier is always **`high`**. For each path, if the path’s tier **changes** from the previous step, the full prompt at that step is priced as **input** only (cold start). If the tier is **unchanged** and the previous **`messages`** are a **semantic prefix** of the current ones, the prefix is **cache read** and the delta is **cache write**; otherwise fall back to **input** only.
+- **Output tokens:** for step *i* with a following step, estimated from **`messages`** delta (assistant role only, including **`tool_calls`** JSON). The last step in a trajectory uses the trajectory’s average of those estimates when available, else **`fallback_output_tokens`** (see `router_accounting` JSON field).
 
 ### Router accounting metrics (`router_accounting`)
 
-The eval summary and each **`by_benchmark`** block include **`router_accounting`**, computed only on **evaluable** rows (no `error`, with int `pred_tier_id` / `gold_tier_id`). Skipped rows are excluded from **`n_e`**, from **`D`**, and from **`N`**. Three component fields use a **0–100** scale (float), plus one **composite** derived from them:
+Computed in **`compute_router_accounting_metrics`** (`main.eval.section11`). Rows with **`error`** are still grouped by trajectory but do not contribute **`pred_tier_id`** / **`gold_tier_id`** math inside failed trajectories; any step with **`error`** marks the **whole trajectory** as failed for **`pass_rate_percent`**.
+
+**Trajectory pass:** no step has **`error`**, and **every** evaluable step satisfies **`pred_tier_id >= gold_tier_id`**.
+
+**Trajectory exact:** trajectory pass and **every** evaluable step has **`pred_tier_id == gold_tier_id`**.
+
+**Savings numerator `N_usd` and denominator `D_usd`:** summed over **evaluable steps** only (steps without **`error`**, with int **`pred_tier_id`** / **`gold_tier_id`**). For each such step, **`baseline_cost`**, **`gold_cost`**, and **`pred_cost`** are the full four-category USD costs at the respective tiers (see **Nominal pricing**). **`D_usd += baseline_cost − gold_cost`**. If the trajectory **passes**, **`N_usd += baseline_cost − pred_cost`** on each evaluable step; if the trajectory **fails** (any **`error`** or any **`pred < gold`**), **`N_usd -= pred_cost`** on **every** evaluable step in that trajectory (all predicted routing spend counts against **`N`**).
 
 | Field | Definition |
 |-------|------------|
-| **`pass_rate_percent`** | `100 × (pred ≥ gold) / n_e`. NaN if `n_e = 0`. |
-| **`exact_match_rate_percent`** | `100 × (pred == gold) / n_e`. Same as `tier_match_accuracy × 100` on the evaluable set. NaN if `n_e = 0`. |
-| **`accounting_savings_score_percent`** | `100 × N / D`. **D** = Σ nominal `(cost(high) − cost(gold))` over evaluable rows (same \(T\) as in **`cost_savings_score`**). **N** = on pass, add `(cost(high) − cost(pred))`; on fail (`pred < gold`), add **`−(pred + 1)`** (dimensionless penalty). **Always-high routing** ⇒ `N = 0` ⇒ **0** when `D > 0`. Can be **negative** if failures dominate. **NaN** if `D = 0` (e.g. all gold is `high`) or `n_e = 0`. |
-| **`overall_score_percent`** | **`(pass_rate_percent + exact_match_rate_percent + accounting_savings_score_percent) / 3`**. **NaN** if **any** of the three components is **NaN**. |
+| **`total_trajectories`** | Count of distinct **`instance_id`** groups in the scored row list. |
+| **`passed_trajectories`** / **`exact_match_trajectories`** | Trajectory-level pass / all-step exact counts. |
+| **`evaluable_step_count`** | Steps without **`error`** with int tier ids (contribute to **`D_usd`** / **`N_usd`**). |
+| **`skipped_step_count`** | Rows with **`error`**. |
+| **`D_usd`** | **`Σ (baseline_cost − gold_cost)`** over evaluable steps. |
+| **`N_usd`** | As above (pass vs fail trajectory rules). |
+| **`pass_rate_percent`** | **`100 × passed_trajectories / total_trajectories`**. NaN if no trajectories. |
+| **`exact_match_rate_percent`** | **`100 × exact_match_trajectories / total_trajectories`**. **Not** the same as top-level **`tier_match_accuracy`** (which remains **step-level** exact rate). NaN if no trajectories. |
+| **`accounting_savings_score_percent`** | **`100 × N_usd / D_usd`** when **`D_usd > 0`**; **NaN** if **`D_usd == 0`** or there are no trajectories. |
+| **`overall_score_percent`** | Mean of **`pass_rate_percent`**, **`exact_match_rate_percent`**, **`accounting_savings_score_percent`**; **NaN** if any component is **NaN**. |
+| **`fallback_output_tokens`** | Constant used when output tokens cannot be inferred from **`messages`** deltas. |
 
-`N` mixes USD-consistent savings on passed rows with integer penalties on failed rows; treat **`accounting_savings_score_percent`** as an **interpretive** index, **not** comparable to legacy **`cost_savings_score`**. Implementations: `compute_router_accounting_metrics` in `main.eval.section11`.
-
-Top-level **`tier_match_accuracy`** (0–1) and **`accuracy_excluding_errors`** both use **evaluable / sampled** semantics for the ratio of exact matches (same value).
+Top-level **`tier_match_accuracy`** (0–1) and **`accuracy_excluding_errors`** remain **step-level** exact-match rates (same value). **`by_benchmark`** / **`exact_match`** counts are also **step-level** (rows with **`match`**).
 
 ## Python API
 

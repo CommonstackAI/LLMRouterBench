@@ -6,14 +6,23 @@ import math
 from collections import defaultdict
 from typing import Any
 
-from main.pricing import step_nominal_cost_usd
+from main.pricing import step_full_cost_usd, step_nominal_cost_usd
 from main.tiers import ID_TO_TIER, TIER_HIGH, public_tier_to_id
+from main.tokenizer import (
+    estimate_output_tokens_from_delta,
+    split_prompt_tokens_for_step,
+)
 
 # Baseline trajectory: always route at highest public tier (guide table "高").
 _BASELINE_TIER_ID = public_tier_to_id(TIER_HIGH)
+_BASELINE_TIER = TIER_HIGH
 
 # Uniform completion tokens per routing step (public bank has no per-step counts).
 _ASSUMED_COMPLETION_TOKENS_PER_ROUTING_STEP = 1_000_000
+
+# Fallback output tokens when estimation from message delta is not possible
+# (single-turn cases / last step of a trajectory with no internal references).
+_FALLBACK_OUTPUT_TOKENS = 500
 
 
 def _step_nominal_usd(tier_id: int) -> float:
@@ -86,65 +95,223 @@ def compute_section11(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _compute_path_step_cost(
+    *,
+    tier: str,
+    prev_tier: str | None,
+    msgs_curr: list[dict[str, Any]],
+    msgs_prev: list[dict[str, Any]] | None,
+    output_tokens: int,
+) -> float:
+    """Full cost (input + cache + output) for one step on a given routing path."""
+    inp, cr, cw = split_prompt_tokens_for_step(
+        prev_tier=prev_tier,
+        curr_tier=tier,
+        msgs_prev=msgs_prev,
+        msgs_curr=msgs_curr,
+    )
+    return step_full_cost_usd(
+        input_tokens=inp,
+        cache_read_tokens=cr,
+        cache_write_tokens=cw,
+        output_tokens=output_tokens,
+        tier=tier,
+    )
+
+
+def _estimate_trajectory_output_tokens(
+    steps: list[dict[str, Any]],
+) -> list[int]:
+    """Return estimated output tokens for each step in a trajectory.
+
+    For step N (N < len-1): estimated from the assistant-role delta between
+    step N and step N+1.  For the last step (or if no delta available): uses
+    the trajectory-internal average when available, else ``_FALLBACK_OUTPUT_TOKENS``.
+    """
+    n = len(steps)
+    out: list[int | None] = [None] * n
+
+    for i in range(n - 1):
+        tier = ID_TO_TIER[steps[i]["gold_tier_id"]]
+        out[i] = estimate_output_tokens_from_delta(
+            steps[i]["messages"],
+            steps[i + 1]["messages"],
+            tier,
+        )
+
+    estimated = [t for t in out if t is not None and t > 0]
+    avg = int(sum(estimated) / len(estimated)) if estimated else _FALLBACK_OUTPUT_TOKENS
+
+    return [t if t is not None else avg for t in out]
+
+
 def compute_router_accounting_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """
-    Evaluable-set metrics (rows without ``error`` with int ``pred_tier_id`` / ``gold_tier_id``).
+    Trajectory-level accounting metrics with full cost model (input + cache + output).
 
-    * ``pass_rate_percent``: 100 * (pred >= gold) / n_e
-    * ``exact_match_rate_percent``: 100 * exact / n_e
-    * ``accounting_savings_score_percent``: 100 * N / D where D = sum(baseline - gold cost),
-      N sums (baseline - pred cost) on pass and ``-(pred + 1)`` on fail (pred < gold).
-    * ``overall_score_percent``: arithmetic mean of the three fields above; NaN if any of them is NaN.
+    **Trajectory grouping**: rows are grouped by ``instance_id``.  Single-turn
+    rows (``total_steps == 1``) each form their own trajectory.
 
-    Skipped rows (API/parse failure) are excluded from n_e, D, and N. Legacy ``compute_section11``
-    remains unchanged. ``accounting_savings_score_percent`` mixes USD terms with integer penalties;
-    it can be negative when N < 0. ``D == 0`` or ``n_e == 0`` yields NaN for the ratio fields.
+    **Pass/fail at trajectory level**: a trajectory *fails* if any step has an
+    ``error`` or any step's ``pred_tier_id < gold_tier_id``.
+
+    **Cost model**: each step's cost = input + cache_read + cache_write + output,
+    computed separately for baseline (always ``high``), gold, and pred paths.
+    Tier switches between consecutive steps reset the cache (cold start = all
+    input); same-tier continuation uses cache_read + cache_write.
+
+    * ``pass_rate_percent``: trajectory-level pass rate (100 * passed_trajectories / total)
+    * ``exact_match_rate_percent``: 100 * (all steps exact) / total trajectories
+    * ``accounting_savings_score_percent``: 100 * N / D
+      - D = sum over all evaluable steps of (baseline_cost - gold_cost)
+      - N: pass trajectory steps contribute (baseline_cost - pred_cost);
+            fail trajectory steps contribute -pred_cost
+    * ``overall_score_percent``: mean of the three above; NaN if any is NaN.
+
+    Returned keys include ``total_trajectories``, ``D_usd``, ``N_usd``, and
+    ``fallback_output_tokens`` (see package README for semantics).
     """
-    skipped_count = sum(1 for r in rows if "error" in r)
-    evaluable: list[dict[str, Any]] = []
+    # -- group rows into trajectories by instance_id --
+    traj_map: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
-        if "error" in r:
-            continue
-        pred = r.get("pred_tier_id")
-        gold = r.get("gold_tier_id")
-        if not isinstance(pred, int) or not isinstance(gold, int):
-            raise ValueError(
-                "evaluable row must have int pred_tier_id and gold_tier_id "
-                f"(id={r.get('id')!r})"
-            )
-        evaluable.append(r)
+        iid = r.get("instance_id", r["id"])
+        traj_map[iid].append(r)
 
-    n_e = len(evaluable)
-    baseline_cost = _step_nominal_usd(_BASELINE_TIER_ID)
-    passed = 0
-    exact = 0
+    # Sort each trajectory by step_index
+    for iid in traj_map:
+        traj_map[iid].sort(key=lambda r: r.get("step_index", 1))
+
+    skipped_steps = sum(1 for r in rows if "error" in r)
+    total_trajectories = len(traj_map)
+    passed_trajectories = 0
+    exact_trajectories = 0
+    n_evaluable_steps = 0
     d_sum = 0.0
     n_sum = 0.0
 
-    for r in evaluable:
-        pred = r["pred_tier_id"]
-        gold = r["gold_tier_id"]
-        cost_gold = _step_nominal_usd(gold)
-        d_sum += baseline_cost - cost_gold
-        if pred >= gold:
-            passed += 1
-            if pred == gold:
-                exact += 1
-            n_sum += baseline_cost - _step_nominal_usd(pred)
-        else:
-            n_sum -= pred + 1
+    for iid, steps in traj_map.items():
+        # Determine trajectory-level pass/fail
+        has_error = any("error" in s for s in steps)
+        all_step_pass = True
+        all_step_exact = True
 
-    pass_rate_percent = 100.0 * passed / n_e if n_e else float("nan")
-    exact_match_rate_percent = 100.0 * exact / n_e if n_e else float("nan")
+        evaluable_steps: list[dict[str, Any]] = []
+        for s in steps:
+            if "error" in s:
+                all_step_pass = False
+                all_step_exact = False
+                continue
+            pred = s.get("pred_tier_id")
+            gold = s.get("gold_tier_id")
+            if not isinstance(pred, int) or not isinstance(gold, int):
+                raise ValueError(
+                    "evaluable row must have int pred_tier_id and gold_tier_id "
+                    f"(id={s.get('id')!r})"
+                )
+            if pred < gold:
+                all_step_pass = False
+                all_step_exact = False
+            elif pred != gold:
+                all_step_exact = False
+            evaluable_steps.append(s)
+
+        trajectory_passed = not has_error and all_step_pass
+        trajectory_exact = not has_error and all_step_exact
+
+        if trajectory_passed:
+            passed_trajectories += 1
+        if trajectory_exact:
+            exact_trajectories += 1
+
+        if not evaluable_steps:
+            continue
+
+        # Estimate output tokens for the full trajectory (including error steps
+        # that we'll skip; indices in `steps` align with output_tokens list).
+        output_tokens_list = _estimate_trajectory_output_tokens(steps)
+
+        # Build a step_index -> position lookup for the sorted trajectory
+        step_idx_to_pos = {s.get("step_index", 1): i for i, s in enumerate(steps)}
+
+        for s in evaluable_steps:
+            n_evaluable_steps += 1
+            pos = step_idx_to_pos[s.get("step_index", 1)]
+            pred_tier_id: int = s["pred_tier_id"]
+            gold_tier_id: int = s["gold_tier_id"]
+            pred_tier = ID_TO_TIER[pred_tier_id]
+            gold_tier = ID_TO_TIER[gold_tier_id]
+            msgs_curr: list[dict[str, Any]] = s.get("messages", [])
+            output_tok = output_tokens_list[pos]
+
+            # Previous step info (for cache logic)
+            msgs_prev: list[dict[str, Any]] | None = None
+            prev_baseline_tier: str | None = None
+            prev_gold_tier: str | None = None
+            prev_pred_tier: str | None = None
+            if pos > 0:
+                prev_s = steps[pos - 1]
+                msgs_prev = prev_s.get("messages", [])
+                prev_baseline_tier = _BASELINE_TIER
+                prev_gold_tier = ID_TO_TIER[prev_s["gold_tier_id"]] if isinstance(prev_s.get("gold_tier_id"), int) else None
+                prev_pred_tier = ID_TO_TIER[prev_s["pred_tier_id"]] if isinstance(prev_s.get("pred_tier_id"), int) else None
+
+            # Baseline cost (always high tier)
+            baseline_cost = _compute_path_step_cost(
+                tier=_BASELINE_TIER,
+                prev_tier=prev_baseline_tier,
+                msgs_curr=msgs_curr,
+                msgs_prev=msgs_prev,
+                output_tokens=output_tok,
+            )
+
+            # Gold cost
+            gold_cost = _compute_path_step_cost(
+                tier=gold_tier,
+                prev_tier=prev_gold_tier,
+                msgs_curr=msgs_curr,
+                msgs_prev=msgs_prev,
+                output_tokens=output_tok,
+            )
+
+            # Pred cost
+            pred_cost = _compute_path_step_cost(
+                tier=pred_tier,
+                prev_tier=prev_pred_tier,
+                msgs_curr=msgs_curr,
+                msgs_prev=msgs_prev,
+                output_tokens=output_tok,
+            )
+
+            d_sum += baseline_cost - gold_cost
+
+            if trajectory_passed:
+                n_sum += baseline_cost - pred_cost
+            else:
+                n_sum -= pred_cost
+
+    pass_rate_percent = (
+        100.0 * passed_trajectories / total_trajectories
+        if total_trajectories
+        else float("nan")
+    )
+    exact_match_rate_percent = (
+        100.0 * exact_trajectories / total_trajectories
+        if total_trajectories
+        else float("nan")
+    )
+
     if d_sum > 0:
         accounting_savings_score_percent = 100.0 * n_sum / d_sum
-        ratio_note = "100 * N / D; N mixes USD savings on pass and integer penalty on fail."
-    elif n_e == 0:
+        ratio_note = (
+            "100 * N / D; trajectory-level pass/fail. "
+            "Pass: N += baseline_cost - pred_cost; Fail: N -= pred_cost."
+        )
+    elif total_trajectories == 0:
         accounting_savings_score_percent = float("nan")
-        ratio_note = "n_e == 0: no evaluable rows."
+        ratio_note = "No trajectories."
     else:
         accounting_savings_score_percent = float("nan")
-        ratio_note = "D == 0: no nominal savings vs always-high on evaluable set (e.g. all gold high)."
+        ratio_note = "D == 0: no nominal savings vs always-high (e.g. all gold high)."
 
     overall_score_percent = _overall_router_score_percent(
         pass_rate_percent,
@@ -153,17 +320,18 @@ def compute_router_accounting_metrics(rows: list[dict[str, Any]]) -> dict[str, A
     )
 
     return {
-        "evaluable_count": n_e,
-        "skipped_count": skipped_count,
-        "passed_count": passed,
-        "exact_match_count": exact,
-        "D_nominal_usd": d_sum,
-        "N_mixed": n_sum,
+        "total_trajectories": total_trajectories,
+        "passed_trajectories": passed_trajectories,
+        "exact_match_trajectories": exact_trajectories,
+        "evaluable_step_count": n_evaluable_steps,
+        "skipped_step_count": skipped_steps,
+        "D_usd": d_sum,
+        "N_usd": n_sum,
         "pass_rate_percent": pass_rate_percent,
         "exact_match_rate_percent": exact_match_rate_percent,
         "accounting_savings_score_percent": accounting_savings_score_percent,
         "overall_score_percent": overall_score_percent,
-        "assumed_completion_tokens_per_routing_step": _ASSUMED_COMPLETION_TOKENS_PER_ROUTING_STEP,
+        "fallback_output_tokens": _FALLBACK_OUTPUT_TOKENS,
         "note": ratio_note,
     }
 

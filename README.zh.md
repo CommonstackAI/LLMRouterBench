@@ -36,7 +36,7 @@ print(summary["router_accounting"])
 
 - **开源范围**：本目录是仓库中**唯一**计划开源的部分。对外只发布 `main` 包、`data/` 题库与文档；**不包含**私有测试脚本。
 - **版本**：`0.1.0`（变更见 [CHANGELOG.md](CHANGELOG.md)）。
-- **依赖**：核心包依赖 `requests` 用于 HTTP 辅助。
+- **依赖**：核心包依赖 `requests`（`main.router_llm` 等 HTTP 辅助）与 `tiktoken`（`main.tokenizer` 中用于 `router_accounting` 的 token 计数）。
 - **本地测试**：你可以在本目录下建立 `tests/` 目录运行 `pytest`，该目录已被 `.gitignore` 忽略，不会提交。
 
 ## 目录结构
@@ -117,16 +117,27 @@ print(summary["router_accounting"])
 | `swebench`   | 336 | 82    | 37    | 43         | 174    |
 
 
-## 名义定价（输出 token）
+## 名义定价（USD / 百万 token）
 
+以代码为准：`main.pricing` 中的 `TIER_*_USD_PER_1M` 常量。下表与发布包内数值一致。
 
-| 公开 `target_tier` | 每百万 **输出** token 的 USD |
-| ---------------- | ---------------------- |
-| `low`            | 0.5                    |
-| `mid`            | 1.2                    |
-| `mid_high`       | 3.0                    |
-| `high`           | 20.0                   |
+### 输出（completion）token
 
+| 公开 `target_tier` | 每百万 **输出** token（USD） |
+| ---------------- | ------------------------ |
+| `low`            | 0.5                      |
+| `mid`            | 2.0                      |
+| `mid_high`       | 5.0                      |
+| `high`           | 25.0                     |
+
+### 输入、cache read、cache write（仅用于 `router_accounting`）
+
+| 公开 `target_tier` | 每百万 **input**（USD） | 每百万 **cache read**（USD） | 每百万 **cache write**（USD） |
+| ---------------- | --------------------- | -------------------------- | --------------------------- |
+| `low`            | 0.26                  | 0.13                       | 0.0                         |
+| `mid`            | 0.30                  | 0.059                      | 0.0                         |
+| `mid_high`       | 0.50                  | 0.05                       | 0.08333                     |
+| `high`           | 5.0                   | 0.50                       | 6.25                        |
 
 在评测管线里根据**具体模型端点**算成本时，本库会把已知模型 id 映射到上述档位；未知 id 会抛出 `ValueError`。该映射只存在于代码中，**不在**开放 JSONL 里。
 
@@ -157,35 +168,56 @@ print(summary["router_accounting"])
 
 ## 记分规则（路由步骤评测）
 
-下列指标由 `**main.eval**` 计算。它们评测**单条监督步骤上的档位选择**，使用上表按档位的 **每百万 token 名义输出价** 做 **逐步** 名义成本比较；**不要求**把完整 benchmark 任务跑到结束。
+下列指标由 `main.eval` 计算。**`section_11`**（含旧版 **`cost_savings_score`**）仍按**一行一步**、仅用**输出 token** 名义价与固定完成长度 \(T\) 比较成本。**`router_accounting`** 使用 **input + cache read + cache write + output** 的逐步名义成本，并在 **trajectory（`instance_id`）** 粒度上定义通过率与节省比。两者都不要求把完整 benchmark 任务跑到结束。
 
+| 指标 | 定义 |
+|------|------|
+| **`tier_match_accuracy`** | **可评**行（无 `error`）中 `pred_tier_id == gold_tier_id` 的比例；跳过题**不计入分母**。**按步（按行）**。 |
+| **`valid_response_rate`** | 得到有效预测（未记录 `error`）的行占比。 |
+| **通过（`passed`）** | `pred_tier_id >= gold_tier_id`。带 `error` 的行**不算**通过。与汇总里的 **`pass_rate`** 同为**按步**。 |
+| **`pass_rate`** | 全部行上 `passed / sampled`。 |
+| **`cost_savings_score`**（**`section_11`**） | 基线 = **始终 `high`（id 3）**。对每个 **已通过** 且金标**严格低于** `high` 的行，仅用**输出价**，且用统一正数 **`assumed_completion_tokens_per_routing_step`**（默认 **1_000_000**）作为 \(T\)：`cost(tier) = T × (该档输出 USD/1M) / 10^6`。`save_gt = cost(high) − cost(gold)`，`save_test = cost(high) − cost(pred)`。在 `save_gt > 0` 的已通过行上，**得分 = `100 × Σ save_test / Σ save_gt`**。 |
 
-| 指标                        | 定义                                                                                                                                                                                                                                                                                                                            |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `**tier_match_accuracy`** | **可评**行（无 `error`）中 `pred_tier_id == gold_tier_id` 的比例；跳过题**不计入分母**。                                                                                                                                                                                                                                                          |
-| `**valid_response_rate`** | 得到有效预测（未记录 `error`）的行占比。                                                                                                                                                                                                                                                                                                      |
-| **通过（`passed`）**          | `pred_tier_id >= gold_tier_id`（预测档位能力不低于金标）。带 `error` 的行**不算**通过。                                                                                                                                                                                                                                                             |
-| `**pass_rate`**           | 全部行上 `passed / sampled`。                                                                                                                                                                                                                                                                                                      |
-| `**cost_savings_score**`  | 基线设为**始终路由到 `high`（档位 id 3）**。对每个 **已通过** 且金标**严格低于** `high` 的行，用**统一的正数完成长度** T 定义逐步名义成本（公开题库无逐步 token 数；库内用固定 T，当各步 T 相同时节省比例有明确含义）：`cost(tier) = T × (该档 USD/1M) / 10^6`。再令 `save_gt = cost(high) - cost(gold)`，`save_test = cost(high) - cost(pred)`。在 `save_gt > 0` 的已通过行上，**得分 = `100 × Σ save_test / Σ save_gt`**。 |
+**与任务级 benchmark 的关系：** 任务通过率需要端到端执行轨迹；本题库是**路由监督**切片，衡量档位是否够用（`pass_rate`）及相对「始终最高档」的名义费用（`cost_savings_score` 与/或 `router_accounting`）。
 
+### Trajectory（`instance_id`）
 
-**与任务级 benchmark 的关系：** **任务通过率**（例如 SWE-Bench 是否 Resolved）需要带**已执行轨迹**的**端到端**评测架。本题库评测是 **路由监督** 切片：在所述假设下，衡量路由器 **档位选择是否够用**（`pass_rate`）以及相对「始终最高档」能省多少 **名义费用**（`cost_savings_score`）。
+相同 **`instance_id`** 的多行构成一条 **trajectory**（多轮监督）。**`step_index` / `total_steps`** 排序各步。单轮行通常 **`total_steps == 1`**，同样有 **`instance_id`**。
+
+计算 **`router_accounting`** 时，**`evaluate_question_bank_rows`** 及外部合并脚本（如 ClawRouter `score_with_crb.py`）应在每条 **`per_row`** 中带上 **`instance_id`**、**`step_index`**、**`total_steps`**、**`messages`**，以便用与路由时一致的前缀计费。
+
+### Token 计数（`main.tokenizer`）
+
+从每行 **`messages`** 用 **`tiktoken`** 计数；编码名在 **`TIER_TOKENIZER_ENCODING`**（当前各档均为 **`cl100k_base`** 的离线近似，可在该常量处替换为各厂商真实 tokenizer）。
+
+- **语义前缀：** 相邻两步的 **`messages`** 在 **`role`**、**`content`**（字符串或块列表；块内忽略 **`cache_control`**）、**`tool_calls`**、**`tool_call_id`**、**`name`** 上比较，避免上游日志序列化差异误判缓存。
+- **prompt 拆分（baseline / gold / pred 各自一条路径）：** baseline 恒为 **`high`**。若该路径上本步档位与上步**不同**，本步整段 prompt 按 **input** 计价（冷启动）。若**相同**且上步 **`messages`** 是当前步的**语义前缀**，则前缀为 **cache read**、增量为 **cache write**；否则回退为仅 **input**。
+- **输出 token：** 有下一步时，从 **`messages`** 增量中只计 **`role=assistant`**（含 **`tool_calls`** JSON）。轨迹最后一步用前面步估算值的平均，否则用 **`fallback_output_tokens`**（见 `router_accounting` 字段）。
 
 ### 账本式路由指标（`router_accounting`）
 
-汇总 JSON 与每个 **`by_benchmark`** 内包含 **`router_accounting`**，仅在 **可评**行上计算（无 `error`，且 `pred_tier_id` / `gold_tier_id` 为 int）。**跳过题**不参与 **`n_e`**、**`D`**、**`N`**。三个 **分量** 为 **0–100** 浮点百分制，另有一个由三者算术平均得到的 **总分**：
+由 **`compute_router_accounting_metrics`**（`main.eval.section11`）计算。任一步带 **`error`** 的 trajectory 在 **`pass_rate_percent`** 上计为**未通过**。
+
+- **Trajectory 通过：** 无 **`error`**，且每个可评步满足 **`pred_tier_id >= gold_tier_id`**。
+- **Trajectory 全中：** trajectory 通过且每个可评步 **`pred_tier_id == gold_tier_id`**。
+
+**`D_usd` / `N_usd`：** 仅在**无 `error`** 且 **`pred_tier_id` / `gold_tier_id` 为 int** 的步上累加。每步计算 **`baseline_cost`**、**`gold_cost`**、**`pred_cost`**（四段定价之和）。**`D_usd += baseline_cost − gold_cost`**。若 trajectory **通过**，每可评步 **`N_usd += baseline_cost − pred_cost`**；若 **未通过**（任一步 **`error`** 或任一步 **`pred < gold`**），该 trajectory **每个可评步**均 **`N_usd -= pred_cost`**（该 trajectory 上所有预测路由花费均计入 **`N` 的负向**）。
 
 | 字段 | 定义 |
 |------|------|
-| **`pass_rate_percent`** | `100 × (pred ≥ gold) / n_e`。`n_e=0` 时为 NaN。 |
-| **`exact_match_rate_percent`** | `100 × (pred == gold) / n_e`，与可评集上 `tier_match_accuracy × 100` 一致。`n_e=0` 时为 NaN。 |
-| **`accounting_savings_score_percent`** | `100 × N / D`。**D** = 可评行上名义 `cost(high) − cost(gold)` 之和（\(T\) 与上文 **`cost_savings_score`** 一致）。**N**：**通过**行加 `cost(high) − cost(pred)`；**失败**（`pred < gold`）加 **`−(pred + 1)`**（无量纲惩罚）。**恒 pred=high** 且 `D>0` 时为 **0**；失败多时可为**负**；**D=0**（例如金标全是 high）或 `n_e=0` 时为 NaN。 |
-| **`overall_score_percent`** | **`(pass_rate_percent + exact_match_rate_percent + accounting_savings_score_percent) / 3`**。三个分量中**任一**为 NaN 时，总分也为 **NaN**。 |
+| **`total_trajectories`** | 当前评分行列表中不同 **`instance_id`** 的个数。 |
+| **`passed_trajectories` / `exact_match_trajectories`** | trajectory 级通过 / 全步精确匹配条数。 |
+| **`evaluable_step_count`** | 无 **`error`** 且 tier id 为 int 的步数（参与 **`D_usd` / `N_usd`**）。 |
+| **`skipped_step_count`** | 含 **`error`** 的行数。 |
+| **`D_usd`** | **`Σ (baseline_cost − gold_cost)`**（可评步）。 |
+| **`N_usd`** | 按上段 pass / fail trajectory 规则。 |
+| **`pass_rate_percent`** | **`100 × passed_trajectories / total_trajectories`**。 |
+| **`exact_match_rate_percent`** | **`100 × exact_match_trajectories / total_trajectories`**。**注意：** 与顶层 **`tier_match_accuracy`**（**按步**完全匹配率）**不是**同一指标。 |
+| **`accounting_savings_score_percent`** | **`100 × N_usd / D_usd`**（**`D_usd > 0`** 时）；否则 NaN。 |
+| **`overall_score_percent`** | 上述三个百分量的算术平均；任一为 NaN 则总分为 NaN。 |
+| **`fallback_output_tokens`** | 无法从增量推断输出 token 时的回退常数。 |
 
-
-`N` 混合了通过行的 USD 名义节省与失败行的整数惩罚；**`accounting_savings_score_percent`** 为**解释性**指标，**不可**与旧版 **`cost_savings_score`** 直接对比。实现见 `main.eval.section11` 的 `compute_router_accounting_metrics`。
-
-顶层 `**tier_match_accuracy**`（0–1）与 `**accuracy_excluding_errors**` 在完全匹配率上**数值相同**（均可评集分母）。
+顶层 **`tier_match_accuracy`** 与 **`accuracy_excluding_errors`** 仍为**按步**完全匹配率（二者数值相同）。**`by_benchmark`** 里的 **`exact_match`** 亦为**按步**计数（**`match`** 为真的行数）。
 
 ## Python API
 

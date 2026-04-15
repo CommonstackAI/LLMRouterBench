@@ -56,6 +56,10 @@ def evaluate_question_bank_rows(
                 "pred_tier_id": pred,
                 "match": ok,
                 "passed": passed,
+                "instance_id": row.get("instance_id", rid),
+                "step_index": row.get("step_index", 1),
+                "total_steps": row.get("total_steps", 1),
+                "messages": row.get("messages", []),
             }
             if pred_obj.usage is not None:
                 rec["usage"] = pred_obj.usage
@@ -75,6 +79,10 @@ def evaluate_question_bank_rows(
                     "benchmark": bench,
                     "gold_tier_id": gold,
                     "error": err_s,
+                    "instance_id": row.get("instance_id", rid),
+                    "step_index": row.get("step_index", 1),
+                    "total_steps": row.get("total_steps", 1),
+                    "messages": row.get("messages", []),
                 }
             )
             if progress:
