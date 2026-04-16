@@ -93,10 +93,10 @@ For **BFCL**, the public corpus now includes both **single-turn** and **multi-tu
 
 | `target_tier` | `target_tier_id` | Rows | Share |
 |---------------|-----------------|-----:|------:|
-| `low` | 0 | 677 | 69.8% |
-| `mid` | 1 | 66 | 6.8% |
-| `mid_high` | 2 | 51 | 5.3% |
-| `high` | 3 | 176 | 18.1% |
+| `low` | 0 | 689 | 71.0% |
+| `mid` | 1 | 62 | 6.4% |
+| `mid_high` | 2 | 49 | 5.1% |
+| `high` | 3 | 170 | 17.5% |
 | **Total** | — | **970** | **100%** |
 
 ### Gold `target_tier` by `benchmark` (row counts)
@@ -107,7 +107,7 @@ For **BFCL**, the public corpus now includes both **single-turn** and **multi-tu
 | `mtrag` | 193 | 183 | 8 | 1 | 1 |
 | `pinchbench` | 48 | 41 | 3 | 3 | 1 |
 | `qmsum` | 145 | 132 | 10 | 3 | 0 |
-| `swebench` | 336 | 82 | 37 | 43 | 174 |
+| `swebench` | 336 | 94 | 33 | 41 | 168 |
 
 ## Nominal pricing (USD per 1M tokens)
 
