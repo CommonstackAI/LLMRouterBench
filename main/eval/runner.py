@@ -11,6 +11,7 @@ from main.eval.section11 import (
     aggregate_by_benchmark,
     compute_router_accounting_metrics,
     compute_section11,
+    compute_v2_scores,
 )
 from main.eval.sampling import rows_per_benchmark, select_question_bank_rows
 
@@ -115,6 +116,7 @@ def build_eval_summary(
     counts = benchmark_counts if benchmark_counts is not None else rows_per_benchmark(per_row)
     s11_global = compute_section11(per_row)
     router_acct = compute_router_accounting_metrics(per_row)
+    scores_v2 = compute_v2_scores(per_row)
     tier_acc_evaluable = correct / graded if graded else float("nan")
     summary: dict[str, Any] = {
         "classifier": predictor_label,
@@ -129,6 +131,7 @@ def build_eval_summary(
         "accuracy_excluding_errors": tier_acc_evaluable,
         "api_errors": err_n,
         "valid_response_rate": graded / n if n else float("nan"),
+        "scores_v2": scores_v2,
         "section_11": s11_global,
         "router_accounting": router_acct,
         "by_benchmark": aggregate_by_benchmark(per_row),

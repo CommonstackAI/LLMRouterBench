@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Iterator
 from typing import Any
 
 from main.pricing import step_full_cost_usd, step_nominal_cost_usd
@@ -151,6 +152,208 @@ def _estimate_trajectory_output_tokens(
     return [t if t is not None else avg for t in out]
 
 
+def _compute_trajectory_pass_exact(
+    rows: list[dict[str, Any]],
+) -> tuple[int, int, int]:
+    """
+    Group rows by ``instance_id`` and return ``(passed, exact, total)`` trajectory counts.
+
+    * A trajectory passes iff no step has an error AND every step has ``pred_tier_id >= gold_tier_id``.
+    * A trajectory is exact iff no step has an error AND every step has ``pred_tier_id == gold_tier_id``.
+    """
+    traj_status = _build_trajectory_status(rows)
+    total = len(traj_status)
+    passed = sum(1 for st in traj_status.values() if not st["has_error"] and st["all_pass"])
+    exact = sum(1 for st in traj_status.values() if not st["has_error"] and st["all_exact"])
+    return passed, exact, total
+
+
+def _build_trajectory_status(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Group rows by ``instance_id`` and return per-trajectory state:
+
+        traj_status[iid] = {
+            "has_error": bool,
+            "all_pass": bool,    # every step has pred >= gold (and no error)
+            "all_exact": bool,   # every step has pred == gold (and no error)
+            "step_count": int,   # number of rows belonging to this trajectory
+        }
+    """
+    traj_status: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        iid = r.get("instance_id", r["id"])
+        st = traj_status.setdefault(
+            iid,
+            {"has_error": False, "all_pass": True, "all_exact": True, "step_count": 0},
+        )
+        st["step_count"] += 1
+        if "error" in r:
+            st["has_error"] = True
+            st["all_pass"] = False
+            st["all_exact"] = False
+            continue
+        pred = r.get("pred_tier_id")
+        gold = r.get("gold_tier_id")
+        if not isinstance(pred, int) or not isinstance(gold, int):
+            raise ValueError(
+                "evaluable row must have int pred_tier_id and gold_tier_id "
+                f"(id={r.get('id')!r})"
+            )
+        if pred < gold:
+            st["all_pass"] = False
+            st["all_exact"] = False
+        elif pred != gold:
+            st["all_exact"] = False
+    return traj_status
+
+
+def _iter_trajectory_step_costs(
+    rows: list[dict[str, Any]],
+) -> Iterator[dict[str, Any]]:
+    """
+    Walk the rows trajectory-by-trajectory and yield per-evaluable-step records with
+    full-cost numbers for baseline / gold / pred paths.
+
+    Each yielded record:
+        {
+            "step": <row dict>,
+            "baseline_cost": float,   # USD, always-high path
+            "gold_cost": float,       # USD, gold tier path
+            "pred_cost": float,       # USD, predicted tier path
+            "trajectory_passed": bool,
+            "trajectory_exact": bool,
+            "instance_id": str,
+        }
+
+    This is the shared core for ``compute_router_accounting_metrics`` (v1) and
+    ``compute_v2_scores`` (v2).  Rows with ``error`` are skipped but still mark the
+    trajectory as failed.
+    """
+    traj_map: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        iid = r.get("instance_id", r["id"])
+        traj_map[iid].append(r)
+    for iid in traj_map:
+        traj_map[iid].sort(key=lambda r: r.get("step_index", 1))
+
+    for iid, steps in traj_map.items():
+        has_error = any("error" in s for s in steps)
+        all_step_pass = True
+        all_step_exact = True
+        evaluable_steps: list[dict[str, Any]] = []
+        for s in steps:
+            if "error" in s:
+                all_step_pass = False
+                all_step_exact = False
+                continue
+            pred = s.get("pred_tier_id")
+            gold = s.get("gold_tier_id")
+            if not isinstance(pred, int) or not isinstance(gold, int):
+                raise ValueError(
+                    "evaluable row must have int pred_tier_id and gold_tier_id "
+                    f"(id={s.get('id')!r})"
+                )
+            if pred < gold:
+                all_step_pass = False
+                all_step_exact = False
+            elif pred != gold:
+                all_step_exact = False
+            evaluable_steps.append(s)
+
+        trajectory_passed = not has_error and all_step_pass
+        trajectory_exact = not has_error and all_step_exact
+
+        if not evaluable_steps:
+            continue
+
+        output_tokens_list = _estimate_trajectory_output_tokens(steps)
+        step_idx_to_pos = {s.get("step_index", 1): i for i, s in enumerate(steps)}
+
+        baseline_last_call: dict[str, int] = {}
+        gold_last_call: dict[str, int] = {}
+        pred_last_call: dict[str, int] = {}
+
+        for s in evaluable_steps:
+            pos = step_idx_to_pos[s.get("step_index", 1)]
+            global_step = s.get("step_index", 1)
+            pred_tier_id: int = s["pred_tier_id"]
+            gold_tier_id: int = s["gold_tier_id"]
+            pred_tier = ID_TO_TIER[pred_tier_id]
+            gold_tier = ID_TO_TIER[gold_tier_id]
+            msgs_curr: list[dict[str, Any]] = s.get("messages", [])
+            output_tok = output_tokens_list[pos]
+
+            msgs_prev: list[dict[str, Any]] | None = None
+            prev_baseline_tier: str | None = None
+            prev_gold_tier: str | None = None
+            prev_pred_tier: str | None = None
+            if pos > 0:
+                prev_s = steps[pos - 1]
+                msgs_prev = prev_s.get("messages", [])
+                prev_baseline_tier = _BASELINE_TIER
+                prev_gold_tier = (
+                    ID_TO_TIER[prev_s["gold_tier_id"]]
+                    if isinstance(prev_s.get("gold_tier_id"), int)
+                    else None
+                )
+                prev_pred_tier = (
+                    ID_TO_TIER[prev_s["pred_tier_id"]]
+                    if isinstance(prev_s.get("pred_tier_id"), int)
+                    else None
+                )
+
+            def _is_cache_expired(last_call: dict[str, int], tier: str) -> bool:
+                prev_step = last_call.get(tier)
+                if prev_step is None:
+                    return False
+                return (global_step - prev_step) > _CACHE_TTL_STEPS
+
+            baseline_expired = _is_cache_expired(baseline_last_call, _BASELINE_TIER)
+            gold_expired = _is_cache_expired(gold_last_call, gold_tier)
+            pred_expired = _is_cache_expired(pred_last_call, pred_tier)
+
+            baseline_cost = _compute_path_step_cost(
+                tier=_BASELINE_TIER,
+                prev_tier=prev_baseline_tier,
+                msgs_curr=msgs_curr,
+                msgs_prev=msgs_prev,
+                output_tokens=output_tok,
+                cache_expired=baseline_expired,
+            )
+            gold_cost = _compute_path_step_cost(
+                tier=gold_tier,
+                prev_tier=prev_gold_tier,
+                msgs_curr=msgs_curr,
+                msgs_prev=msgs_prev,
+                output_tokens=output_tok,
+                cache_expired=gold_expired,
+            )
+            pred_cost = _compute_path_step_cost(
+                tier=pred_tier,
+                prev_tier=prev_pred_tier,
+                msgs_curr=msgs_curr,
+                msgs_prev=msgs_prev,
+                output_tokens=output_tok,
+                cache_expired=pred_expired,
+            )
+
+            baseline_last_call[_BASELINE_TIER] = global_step
+            gold_last_call[gold_tier] = global_step
+            pred_last_call[pred_tier] = global_step
+
+            yield {
+                "step": s,
+                "baseline_cost": baseline_cost,
+                "gold_cost": gold_cost,
+                "pred_cost": pred_cost,
+                "trajectory_passed": trajectory_passed,
+                "trajectory_exact": trajectory_exact,
+                "instance_id": iid,
+            }
+
+
 def compute_router_accounting_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Trajectory-level accounting metrics with full cost model (input + cache + output).
@@ -180,150 +383,22 @@ def compute_router_accounting_metrics(rows: list[dict[str, Any]]) -> dict[str, A
     Returned keys include ``total_trajectories``, ``D_usd``, ``N_usd``, and
     ``fallback_output_tokens`` (see package README for semantics).
     """
-    # -- group rows into trajectories by instance_id --
-    traj_map: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for r in rows:
-        iid = r.get("instance_id", r["id"])
-        traj_map[iid].append(r)
-
-    # Sort each trajectory by step_index
-    for iid in traj_map:
-        traj_map[iid].sort(key=lambda r: r.get("step_index", 1))
-
+    passed_trajectories, exact_trajectories, total_trajectories = _compute_trajectory_pass_exact(rows)
     skipped_steps = sum(1 for r in rows if "error" in r)
-    total_trajectories = len(traj_map)
-    passed_trajectories = 0
-    exact_trajectories = 0
     n_evaluable_steps = 0
     d_sum = 0.0
     n_sum = 0.0
 
-    for iid, steps in traj_map.items():
-        # Determine trajectory-level pass/fail
-        has_error = any("error" in s for s in steps)
-        all_step_pass = True
-        all_step_exact = True
-
-        evaluable_steps: list[dict[str, Any]] = []
-        for s in steps:
-            if "error" in s:
-                all_step_pass = False
-                all_step_exact = False
-                continue
-            pred = s.get("pred_tier_id")
-            gold = s.get("gold_tier_id")
-            if not isinstance(pred, int) or not isinstance(gold, int):
-                raise ValueError(
-                    "evaluable row must have int pred_tier_id and gold_tier_id "
-                    f"(id={s.get('id')!r})"
-                )
-            if pred < gold:
-                all_step_pass = False
-                all_step_exact = False
-            elif pred != gold:
-                all_step_exact = False
-            evaluable_steps.append(s)
-
-        trajectory_passed = not has_error and all_step_pass
-        trajectory_exact = not has_error and all_step_exact
-
-        if trajectory_passed:
-            passed_trajectories += 1
-        if trajectory_exact:
-            exact_trajectories += 1
-
-        if not evaluable_steps:
-            continue
-
-        # Estimate output tokens for the full trajectory (including error steps
-        # that we'll skip; indices in `steps` align with output_tokens list).
-        output_tokens_list = _estimate_trajectory_output_tokens(steps)
-
-        # Build a step_index -> position lookup for the sorted trajectory
-        step_idx_to_pos = {s.get("step_index", 1): i for i, s in enumerate(steps)}
-
-        # Per-path TTL tracking: tier -> last global step_index that used this tier.
-        # Baseline always uses _BASELINE_TIER so its cache never expires via TTL
-        # (step distance is always 1).  Gold and pred paths may switch tiers.
-        baseline_last_call: dict[str, int] = {}
-        gold_last_call: dict[str, int] = {}
-        pred_last_call: dict[str, int] = {}
-
-        for s in evaluable_steps:
-            n_evaluable_steps += 1
-            pos = step_idx_to_pos[s.get("step_index", 1)]
-            global_step = s.get("step_index", 1)
-            pred_tier_id: int = s["pred_tier_id"]
-            gold_tier_id: int = s["gold_tier_id"]
-            pred_tier = ID_TO_TIER[pred_tier_id]
-            gold_tier = ID_TO_TIER[gold_tier_id]
-            msgs_curr: list[dict[str, Any]] = s.get("messages", [])
-            output_tok = output_tokens_list[pos]
-
-            # Previous step info (for cache logic — semantic prefix check)
-            msgs_prev: list[dict[str, Any]] | None = None
-            prev_baseline_tier: str | None = None
-            prev_gold_tier: str | None = None
-            prev_pred_tier: str | None = None
-            if pos > 0:
-                prev_s = steps[pos - 1]
-                msgs_prev = prev_s.get("messages", [])
-                prev_baseline_tier = _BASELINE_TIER
-                prev_gold_tier = ID_TO_TIER[prev_s["gold_tier_id"]] if isinstance(prev_s.get("gold_tier_id"), int) else None
-                prev_pred_tier = ID_TO_TIER[prev_s["pred_tier_id"]] if isinstance(prev_s.get("pred_tier_id"), int) else None
-
-            # TTL-based cache expiry for each path
-            def _is_cache_expired(last_call: dict[str, int], tier: str) -> bool:
-                prev_step = last_call.get(tier)
-                if prev_step is None:
-                    return False  # first call handled by prev_tier=None
-                return (global_step - prev_step) > _CACHE_TTL_STEPS
-
-            baseline_expired = _is_cache_expired(baseline_last_call, _BASELINE_TIER)
-            gold_expired = _is_cache_expired(gold_last_call, gold_tier)
-            pred_expired = _is_cache_expired(pred_last_call, pred_tier)
-
-            # Baseline cost (always high tier)
-            baseline_cost = _compute_path_step_cost(
-                tier=_BASELINE_TIER,
-                prev_tier=prev_baseline_tier,
-                msgs_curr=msgs_curr,
-                msgs_prev=msgs_prev,
-                output_tokens=output_tok,
-                cache_expired=baseline_expired,
-            )
-
-            # Gold cost
-            gold_cost = _compute_path_step_cost(
-                tier=gold_tier,
-                prev_tier=prev_gold_tier,
-                msgs_curr=msgs_curr,
-                msgs_prev=msgs_prev,
-                output_tokens=output_tok,
-                cache_expired=gold_expired,
-            )
-
-            # Pred cost
-            pred_cost = _compute_path_step_cost(
-                tier=pred_tier,
-                prev_tier=prev_pred_tier,
-                msgs_curr=msgs_curr,
-                msgs_prev=msgs_prev,
-                output_tokens=output_tok,
-                cache_expired=pred_expired,
-            )
-
-            # Update TTL trackers
-            baseline_last_call[_BASELINE_TIER] = global_step
-            gold_last_call[gold_tier] = global_step
-            pred_last_call[pred_tier] = global_step
-
-            d_sum += baseline_cost - gold_cost
-
-            if trajectory_passed:
-                n_sum += baseline_cost - pred_cost
-            else:
-                n_sum -= pred_cost
+    for rec in _iter_trajectory_step_costs(rows):
+        n_evaluable_steps += 1
+        baseline_cost = rec["baseline_cost"]
+        gold_cost = rec["gold_cost"]
+        pred_cost = rec["pred_cost"]
+        d_sum += baseline_cost - gold_cost
+        if rec["trajectory_passed"]:
+            n_sum += baseline_cost - pred_cost
+        else:
+            n_sum -= pred_cost
 
     pass_rate_percent = (
         100.0 * passed_trajectories / total_trajectories
@@ -369,6 +444,263 @@ def compute_router_accounting_metrics(rows: list[dict[str, Any]]) -> dict[str, A
         "overall_score_percent": overall_score_percent,
         "fallback_output_tokens": _FALLBACK_OUTPUT_TOKENS,
         "note": ratio_note,
+    }
+
+
+def _compute_cost_savings_per_benchmark(
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """
+    Full-cost savings aggregation per benchmark.  **All gold tiers are included**
+    (no row is excluded; gold=high steps are accounted for by every path's real
+    cost under the full-cost model).
+
+    Denominator:
+        D_b += baseline_cost   # always-high total bill per evaluable step
+
+    Numerator (step-level pass/fail):
+        if pred_tier_id >= gold_tier_id:  N_b += baseline_cost - pred_cost
+        else:                              N_b -= pred_cost
+
+    Trajectory-level retry penalty — applies to **every failed trajectory**
+    (any step has an error or ``pred_tier_id < gold_tier_id``), regardless of
+    whether it is single-step or multi-turn:
+        N_b -= Σ baseline_cost over all evaluable steps of that trajectory
+        (one extra always-high re-run of the whole trajectory; for a single-
+        step trajectory this is one baseline step cost, for an N-step
+        trajectory this is N baseline step costs)
+
+    Interpretation: ``cost_savings_score = 100 * N / D`` with D = "what you
+    would have paid at always-high".  Pass steps add the saved delta; fail
+    steps subtract the wasted cheap call; failed trajectories additionally
+    deduct one full baseline re-run.  Score lies in ``(-∞, 100]``; stays in
+    ``[0, 100]`` as long as total waste + retry is below the baseline total.
+
+    Returns per-benchmark dict:
+        {
+            "D_usd", "N_usd",
+            "step_count",                  # evaluable step count (no error)
+            "failed_trajectory_count",
+            "retry_penalty_usd",           # Σ retry penalty applied to this benchmark
+        }
+
+    Note: ``input/cache_read/cache_write/output`` are all combined inside
+    ``baseline_cost`` / ``gold_cost`` / ``pred_cost`` via ``step_full_cost_usd``
+    (see ``main/pricing.py``).  The current token splitter
+    (``split_prompt_tokens_for_step``) assigns ``input_tokens = 0`` under a
+    "prompt cache always on" modelling assumption, so every prompt token is
+    billed as either cache_read (prefix hit) or cache_write (cold start / tier
+    switch / cache expired / delta).
+    """
+    per_bench: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "D_usd": 0.0,
+            "N_usd": 0.0,
+            "step_count": 0,
+            "failed_trajectory_count": 0,
+            "retry_penalty_usd": 0.0,
+        }
+    )
+
+    traj_to_bench: dict[str, str] = {}
+    traj_baseline_sum: dict[str, float] = defaultdict(float)
+
+    for rec in _iter_trajectory_step_costs(rows):
+        s = rec["step"]
+        b = s["benchmark"]
+        iid = rec["instance_id"]
+        traj_to_bench[iid] = b
+        traj_baseline_sum[iid] += rec["baseline_cost"]
+
+        pb = per_bench[b]
+        pb["step_count"] += 1
+        pb["D_usd"] += rec["baseline_cost"]
+        if s["pred_tier_id"] >= s["gold_tier_id"]:
+            pb["N_usd"] += rec["baseline_cost"] - rec["pred_cost"]
+        else:
+            pb["N_usd"] -= rec["pred_cost"]
+
+    traj_status = _build_trajectory_status(rows)
+    # Map every instance_id to a benchmark (even trajectories made entirely of
+    # error rows, which produce no yields from ``_iter_trajectory_step_costs``).
+    if traj_status:
+        missing = set(traj_status.keys()) - set(traj_to_bench.keys())
+        if missing:
+            for r in rows:
+                iid = r.get("instance_id", r["id"])
+                if iid in missing and iid not in traj_to_bench:
+                    traj_to_bench[iid] = r["benchmark"]
+
+    for iid, st in traj_status.items():
+        if not st["has_error"] and st["all_pass"]:
+            continue
+        b = traj_to_bench.get(iid)
+        if b is None:
+            continue
+        retry = traj_baseline_sum.get(iid, 0.0)
+        pb = per_bench[b]
+        pb["N_usd"] -= retry
+        pb["failed_trajectory_count"] += 1
+        pb["retry_penalty_usd"] += retry
+
+    return dict(per_bench)
+
+
+def compute_v2_scores(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Headline v2 scoring.  Produces exactly FOUR component scores plus their mean.
+
+    1. ``case_pass_rate_percent`` — per-row ``pred_tier_id >= gold_tier_id``
+       (rows with errors count as failures; denominator = total row count).
+    2. ``case_exact_match_percent`` — per-row ``pred_tier_id == gold_tier_id``
+       (same denominator; errors count as misses).
+    3. ``trajectory_pass_rate_percent`` — fraction of **rows** whose entire
+       trajectory passes (every step has ``pred_tier_id >= gold_tier_id`` and
+       no error).  Denominator is total rows (same as metric 1) so each
+       evaluation step is weighted equally; trajectory-level all-or-nothing
+       gating is still applied. Guarantees ``trajectory_pass ≤ case_pass``.
+    4. ``cost_savings_score_percent`` — full-cost savings ratio, aggregated
+       over **all rows (every gold tier, including gold=high)** with:
+         (a) Denominator: ``D_b += baseline_cost`` per evaluable step (total
+             always-high bill);
+         (b) Step-level pass/fail: ``pred>=gold`` adds ``baseline-pred_cost``;
+             ``pred<gold`` subtracts ``pred_cost``;
+         (c) Trajectory-level retry penalty: every failed trajectory (any
+             step has an error or ``pred<gold``) additionally subtracts
+             ``Σ baseline_cost`` over all its evaluable steps — one full
+             always-high re-run of the whole trajectory.  Single-step failed
+             trajectories incur 1× baseline; N-step failed trajectories incur
+             N× baseline.
+       Across benchmarks the score is **macro-weighted by total row count**
+       per benchmark (same denominator scope as metric 1).  Score lies in
+       ``(-∞, 100]``; stays in ``[0, 100]`` unless waste + retry exceed the
+       baseline total.
+    5. ``combined_score_percent`` — arithmetic mean of the four scores above.
+
+    Rationale for the cost_savings scope change: ``gold=high`` rows inherently
+    have no cost-savings headroom (baseline already equals gold), so including
+    them in D/N distorts the per-benchmark weighting (a ``gold=high``-dominated
+    benchmark can end up with D≈0 and thus ~zero global weight).  Excluding
+    them and macro-weighting by ``gold<high`` row count keeps the savings score
+    proportional to the share of the workload where routing choice actually
+    affects cost.
+    """
+    total_rows = len(rows)
+    error_rows = sum(1 for r in rows if "error" in r)
+
+    case_pass = 0
+    case_exact = 0
+    for r in rows:
+        if "error" in r:
+            continue
+        pred = r.get("pred_tier_id")
+        gold = r.get("gold_tier_id")
+        if not isinstance(pred, int) or not isinstance(gold, int):
+            raise ValueError(
+                "evaluable row must have int pred_tier_id and gold_tier_id "
+                f"(id={r.get('id')!r})"
+            )
+        if pred >= gold:
+            case_pass += 1
+        if pred == gold:
+            case_exact += 1
+
+    case_pass_rate_percent = 100.0 * case_pass / total_rows if total_rows else float("nan")
+    case_exact_match_percent = 100.0 * case_exact / total_rows if total_rows else float("nan")
+
+    traj_status = _build_trajectory_status(rows)
+    total_traj = len(traj_status)
+    passed_traj = sum(
+        1 for st in traj_status.values() if not st["has_error"] and st["all_pass"]
+    )
+    # Case-weighted trajectory pass: a row contributes to the numerator iff the
+    # trajectory it belongs to passes (all steps pred>=gold, no error).
+    # Denominator is total_rows so metric 3 and metric 1 share the same scale and
+    # trajectory_pass <= case_pass is guaranteed by construction.
+    rows_in_passed_trajectories = sum(
+        st["step_count"] for st in traj_status.values() if not st["has_error"] and st["all_pass"]
+    )
+    trajectory_pass_rate_percent = (
+        100.0 * rows_in_passed_trajectories / total_rows if total_rows else float("nan")
+    )
+
+    per_bench_rowcount: dict[str, int] = defaultdict(int)
+    for r in rows:
+        per_bench_rowcount[r["benchmark"]] += 1
+
+    per_bench_raw = _compute_cost_savings_per_benchmark(rows)
+    per_bench_scores: dict[str, dict[str, Any]] = {}
+    for b, rowcount in per_bench_rowcount.items():
+        raw = per_bench_raw.get(
+            b,
+            {"D_usd": 0.0, "N_usd": 0.0, "step_count": 0, "failed_trajectory_count": 0, "retry_penalty_usd": 0.0},
+        )
+        d_b = raw["D_usd"]
+        n_b = raw["N_usd"]
+        cost_b = 100.0 * n_b / d_b if d_b > 0 else float("nan")
+        per_bench_scores[b] = {
+            "row_count": rowcount,
+            "step_count": raw["step_count"],
+            "failed_trajectory_count": raw["failed_trajectory_count"],
+            "retry_penalty_usd": raw["retry_penalty_usd"],
+            "D_usd": d_b,
+            "N_usd": n_b,
+            "cost_savings_score_percent": cost_b,
+            "weight_in_global_cost_savings": 0.0,
+        }
+
+    total_row_for_weight = sum(per_bench_rowcount.values())
+    if total_row_for_weight > 0:
+        weighted_sum = 0.0
+        have_any = False
+        for b, sc in per_bench_scores.items():
+            w = sc["row_count"] / total_row_for_weight
+            sc["weight_in_global_cost_savings"] = w
+            s = sc["cost_savings_score_percent"]
+            if not math.isnan(s):
+                weighted_sum += w * s
+                have_any = True
+        cost_savings_score_percent = weighted_sum if have_any else float("nan")
+    else:
+        cost_savings_score_percent = float("nan")
+
+    components = [
+        case_pass_rate_percent,
+        case_exact_match_percent,
+        trajectory_pass_rate_percent,
+        cost_savings_score_percent,
+    ]
+    if any(math.isnan(c) for c in components):
+        combined_score_percent = float("nan")
+    else:
+        combined_score_percent = sum(components) / len(components)
+
+    return {
+        "case_pass_rate_percent": case_pass_rate_percent,
+        "case_exact_match_percent": case_exact_match_percent,
+        "trajectory_pass_rate_percent": trajectory_pass_rate_percent,
+        "cost_savings_score_percent": cost_savings_score_percent,
+        "combined_score_percent": combined_score_percent,
+        "total_rows": total_rows,
+        "error_rows": error_rows,
+        "case_pass_count": case_pass,
+        "case_exact_count": case_exact,
+        "total_trajectories": total_traj,
+        "passed_trajectories": passed_traj,
+        "rows_in_passed_trajectories": rows_in_passed_trajectories,
+        "by_benchmark": per_bench_scores,
+        "note": (
+            "cost_savings_score_percent is macro-averaged across benchmarks by each "
+            "benchmark's total row count (same scope as case_pass_rate). All gold tiers "
+            "are included; gold=high contributes 0 to D naturally and may contribute a "
+            "negative N when pred<high (failed gold=high steps subtract pred_cost). "
+            "Per-step accumulation: pred>=gold adds baseline-pred_cost; pred<gold "
+            "subtracts pred_cost. Additionally, every failed trajectory (any step with "
+            "error or pred_tier_id<gold_tier_id) incurs an extra penalty N -= "
+            "Σ baseline_cost over its evaluable steps (one always-high retry). "
+            "trajectory_pass_rate_percent uses row-weighted denominator: a row counts "
+            "toward the numerator iff its entire trajectory passes."
+        ),
     }
 
 

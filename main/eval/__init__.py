@@ -23,6 +23,7 @@ from main.eval.section11 import (
     aggregate_by_benchmark,
     compute_router_accounting_metrics,
     compute_section11,
+    compute_v2_scores,
 )
 
 __all__ = [
@@ -34,6 +35,7 @@ __all__ = [
     "build_eval_summary",
     "compute_router_accounting_metrics",
     "compute_section11",
+    "compute_v2_scores",
     "default_manifest_path",
     "evaluate_question_bank_rows",
     "load_all_question_bank_rows",

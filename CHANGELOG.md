@@ -4,8 +4,20 @@ All notable changes to the open-source **CommonRouterBench** Python distribution
 
 ## [Unreleased]
 
+### Added
+
+- **Headline scores `scores_v2`** in the eval summary (`compute_v2_scores`, exported from `main.eval`), producing four orthogonal component scores plus their arithmetic mean:
+  1. `case_pass_rate_percent` — per-row `pred_tier_id >= gold_tier_id` over total rows.
+  2. `case_exact_match_percent` — per-row `pred_tier_id == gold_tier_id` over total rows.
+  3. `trajectory_pass_rate_percent` — **case-weighted** trajectory pass: a row counts toward the numerator iff its entire trajectory passes; denominator is total rows (same scope as metric 1). Guarantees `trajectory_pass_rate <= case_pass_rate`.
+  4. `cost_savings_score_percent` — full-cost savings with **failure/retry penalty**. All gold tiers included; `D_b += baseline_cost` (total always-high bill); step-level pass adds `baseline - pred_cost`, step-level fail subtracts `pred_cost`; every failed trajectory additionally subtracts `Σ baseline_cost` across its evaluable steps (one full always-high re-run). Macro-weighted across benchmarks by total row count.
+  5. `combined_score_percent` — arithmetic mean of 1–4.
+- Per-benchmark breakdown `scores_v2.by_benchmark.<b>` with `row_count`, `step_count`, `failed_trajectory_count`, `retry_penalty_usd`, `D_usd`, `N_usd`, `cost_savings_score_percent`, and `weight_in_global_cost_savings`.
+- Shared helpers `_build_trajectory_status` and `_iter_trajectory_step_costs` factored out so `compute_router_accounting_metrics` and `compute_v2_scores` walk trajectories through the same code path.
+
 ### Changed
 
+- **Documentation**: both READMEs promote `scores_v2` as the headline; legacy `section_11` / `router_accounting` sections are explicitly marked retained-for-backward-compatibility.
 - **PinchBench data rebuild**: replaced baseline (gpt-5.4) conversation context with validated mixed-model context from actual cascade search runs. Messages now reflect the real optimal-path model responses at each step.
 - PinchBench reduced from 16 tasks / 88 rows to 12 tasks / 48 rows: removed 4 tasks with incomplete mixed-model data (task_10_workflow, task_17_email_search, task_20_eli5_pdf_summary, task_21_openclaw_comprehension).
 - Corrected 3 PinchBench GT tier labels after last-step downgrade validation: task_05_summary step 4 (high→low), task_11_clawdhub step 4 (mid→low), task_12_skill_search step 6 (high→low). These final steps are text-reply summaries where low-tier models score equivalently.

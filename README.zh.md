@@ -27,7 +27,8 @@ from main.eval import FunctionPredictor, run_question_bank_eval
 # 示例：一个总是预测金标档位的 oracle 路由
 oracle = FunctionPredictor(lambda row: row["target_tier_id"])
 summary = run_question_bank_eval(oracle, n=20, seed=1)
-print(summary["router_accounting"])
+# Headline：4 项独立维度分 + 它们的算术平均。
+print(summary["scores_v2"])
 ```
 
 ---
@@ -170,7 +171,52 @@ print(summary["router_accounting"])
 
 ## 记分规则（路由步骤评测）
 
-下列指标由 `main.eval` 计算。**`section_11`**（含旧版 **`cost_savings_score`**）仍按**一行一步**、仅用**输出 token** 名义价与固定完成长度 \(T\) 比较成本。**`router_accounting`** 使用 **input + cache read + cache write + output** 的逐步名义成本，并在 **trajectory（`instance_id`）** 粒度上定义通过率与节省比。两者都不要求把完整 benchmark 任务跑到结束。
+所有指标由 `main.eval` 计算。
+
+**`scores_v2`**（evaluation summary 顶层字段，由 **`compute_v2_scores`** 计算）是**推荐的主打分**：4 个相互正交的维度分 + 它们的算术平均。**`section_11`**（旧版 **`cost_savings_score`**，按行逐步、仅用输出价）与 **`router_accounting`**（轨迹级，`D = Σ(baseline − gold)`，`N` 按轨迹 pass/fail）仍保留以兼容旧消费方，但均**已被 `scores_v2` 取代**。两条路径都不要求把完整 benchmark 任务跑到结束。
+
+### Headline 指标（`scores_v2`）
+
+| # | 字段 | 分母 | 定义 |
+|---|------|------|------|
+| 1 | **`case_pass_rate_percent`** | 全部行 | `#{pred_tier_id >= gold_tier_id}` / 全部行数（`error` 行按失败计）。 |
+| 2 | **`case_exact_match_percent`** | 全部行 | `#{pred_tier_id == gold_tier_id}` / 全部行数。 |
+| 3 | **`trajectory_pass_rate_percent`** | 全部行 | 某行计入分子当且仅当它**所在整条轨迹**每步都 `pred_tier_id >= gold_tier_id` 且无 `error`。分母按行，与 metric 1 同口径，**数学上保证 `trajectory_pass_rate ≤ case_pass_rate`**。 |
+| 4 | **`cost_savings_score_percent`** | USD 比值 | full-cost 口径的省钱率，含失败重试惩罚（见下文"成本节省公式"）；按 benchmark 总行数做宏观加权。范围 `(−∞, 100]`，正常落在 `[0, 100]`。 |
+| 5 | **`combined_score_percent`** | — | 1–4 的算术平均；任一为 NaN 则整体为 NaN。 |
+
+#### 成本节省公式（metric 4）
+
+**包含所有金标档位**（`gold=high` 行在 D 上自然贡献 0，失败时仍对 N 做惩罚）。每个可评步使用与 `router_accounting` 相同的 full-cost 四段模型（`step_full_cost_usd`，见「名义定价」）：
+
+```
+D_b  += baseline_cost                              # baseline = 始终 high 的单步账单
+if pred_tier_id >= gold_tier_id:
+    N_b += baseline_cost - pred_cost               # step-level：省下的差额
+else:                                              # step-level 失败
+    N_b -= pred_cost                               # 低档调用白花的钱
+```
+
+在 step-level 累积之外，**每一条失败轨迹**（任一步 `error` 或 `pred_tier_id < gold_tier_id`）额外扣一次**整条轨迹按 high 重跑**的代价：
+
+```
+for every failed trajectory t:
+    N_b -= Σ baseline_cost over t's evaluable steps
+# 单步失败    => -1 × baseline
+# N 步轨迹失败 => -N × baseline（每一轮均按 high 计）
+```
+
+跨 benchmark 按**总行数**宏观加权（与 metric 1 同口径）：
+
+```
+cost_savings_score_percent = Σ_b (rows_b / total_rows) × (100 × N_b / D_b)
+```
+
+`scores_v2.by_benchmark.<b>` 块提供每个 benchmark 的 `row_count`、`step_count`、`failed_trajectory_count`、`retry_penalty_usd`、`D_usd`、`N_usd`、`cost_savings_score_percent`、`weight_in_global_cost_savings`。
+
+### 旧版按行 / 按步字段（`section_11`）
+
+为保证旧消费方不炸仍保留在 eval summary；新接入请优先使用 `scores_v2` 上方表格。
 
 | 指标 | 定义 |
 |------|------|
@@ -206,7 +252,9 @@ print(summary["router_accounting"])
 - **缓存 TTL：** 同一档位（即同一模型）距上次调用超过 **3 个全局步** 即视为缓存过期，触发全量 cache write。这模拟了多步 agent 轨迹中不同档位交替调用时的真实 prompt cache 失效场景。
 - **输出 token：** 有下一步时，从 **`messages`** 增量中只计 **`role=assistant`**（含 **`tool_calls`** JSON）；该步使用**金标**档位对应的 tokenizer 做计数。轨迹最后一步用前面步估算值的平均，否则用 **`fallback_output_tokens`**（见 `router_accounting` 字段）。
 
-### 账本式路由指标（`router_accounting`）
+### 旧版轨迹级字段（`router_accounting`）
+
+仍保留在 eval summary 以兼容旧消费方；**已被 `scores_v2` 取代**（v2 同样保留轨迹级 pass/fail，但改用 `D = Σ baseline`，并显式加入失败重试惩罚）。
 
 由 **`compute_router_accounting_metrics`**（`main.eval.section11`）计算。含 **`error`** 的步不计入 **`evaluable_step_count`**，也不进入 **`D_usd` / `N_usd`** 的逐步累加；但只要 trajectory 中**任一步**含 **`error`**，该 trajectory 在 **`pass_rate_percent`** 与 **`exact_match_rate_percent`** 上均计为**未通过**。
 
@@ -328,7 +376,7 @@ summary = build_eval_summary(
 # summary = run_question_bank_eval(oracle, predictor_label="oracle_gold", n=20, seed=1)
 ```
 
-公开辅助函数还包括：`manifest_proportional_quotas`、`proportional_reservoir_sample`、`load_all_question_bank_rows`、`compute_section11`、`compute_router_accounting_metrics`、`aggregate_by_benchmark`。
+公开辅助函数还包括：`manifest_proportional_quotas`、`proportional_reservoir_sample`、`load_all_question_bank_rows`、`compute_section11`、`compute_router_accounting_metrics`、`compute_v2_scores`、`aggregate_by_benchmark`。
 
 ## 命令行（CLI）
 
